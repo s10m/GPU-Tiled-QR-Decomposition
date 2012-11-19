@@ -14,8 +14,8 @@
 
 int main(int argc, char* argv[])
 {
-	double* matQ, *matA, *matC;
-	int mq = 64, nq = mq, ma = nq, na = ma, times, timeend, ts, b = 64;
+	double* matQ = NULL, *matA = NULL;
+	int mq = 5, nq = mq, ma = nq, na = ma, b = mq;
 
 	srand(1);
 
@@ -32,7 +32,7 @@ int main(int argc, char* argv[])
 	//matC = multAB(matQ, mq, nq, matA, ma, na,0,0);
 
 	//printMatrix(matC, mq, na);
-	hhQR(matA, b, b, b, 0, 0, mq);
+	hhQR(matA, b, b, b, mq);
 	/*hhQR(matQ, b, b, b, 1, 1, mq);
 	hhQR(matQ, b, b, b, 2, 2, mq);
 	hhQR(matQ, b, b, b, 3, 3, mq);*/
@@ -41,6 +41,7 @@ int main(int argc, char* argv[])
 	deleteMatrix(matQ);
 	deleteMatrix(matA);
 	//deleteMatrix(matC);
+	return 0;
 }
 /**
  * \breif Computes the \f$QR\f$ decomposition of the \f$b\times b\f$ portion of a matrix stored at matA
@@ -56,17 +57,19 @@ int main(int argc, char* argv[])
  * \param lda The number of rows of the matrix as stored in memory
  * \returns A freshly allocated pointer to a matrix of pointers containing the householder reflectors from the decomposition.
  */
-double** hhQR(double* matA, int m, int n, int b, int roffset, int coffset, int lda)//returns Q and triangularises matA in place.
+double** hhQR(double* matA, int m, int n, int b, int lda)//returns Q and triangularises matA in place.
 {
-	int k, i;
+	int k;
 	double* xVect, **v = malloc(b * sizeof(double*));
-	double* matQ = newMatrix(matQ, b, b), *matAgain;
+	double* matQ = NULL, *matAgain;
+	matQ = newMatrix(matQ, b, b);
 	initMatrix(matQ, b, b, 2);
 
 	for(k = 0; k < b; k++)
 	{
 		//x = matA(k:m,k)
 		xVect = matA + CO(k,k,lda);//xVect is column vector from k -> b-k in column k of block
+
 		//vk = sign(x[1])||x||_2e1 + x
 		//vk = vk/||vk||_2
 		v[k] = calcvk(xVect, b - k);
@@ -82,7 +85,7 @@ double** hhQR(double* matA, int m, int n, int b, int roffset, int coffset, int l
 	}
 	printMatrix(matQ, b, b);
 
-	matAgain = multAB(matQ, b, b, matA, b, b, 0, 0);
+	matAgain = multAB(matQ, b, b, matA, b, b);
 	printMatrix(matAgain, b, b);
 	
 	free(v);
@@ -98,8 +101,6 @@ double** hhQR(double* matA, int m, int n, int b, int roffset, int coffset, int l
  * \param m The number of rows in the matrix as stored
  * \param n The number of columns in the matrix as stored
  * \param b The block size in the matrix
- * \param roffset The row-offset into the matrix
- * \param coffset The column-offset into the matrix
  * \param v Pointer to an array containing the Householder reflector \f$v\f$
  * \param l The number of elements in \f$v\f$
  */
@@ -140,36 +141,6 @@ void updateMatHHQRInPlace(
 	}
 }
 
-/*void updateMatHHQR(
-		double* mat,//matrix to be updated
-		int k,//column to start from
-		int m,
-		int n,//update submatrix mat(k:m, k:n)
-		double* v,//householder reflector
-		int l)//dimension of householder reflector
-{
-	double* tempmata, *tempmatb;
-	int i;
-
-	//tempmata = v*vT
-	tempmata = multAB(v, l, 1, v, 1, l,0,0);
-	//tempmata = -2*tempmata
-	for(i = 0; i < (l * l); i ++)
-		tempmata[i] *= -2;
-	//tempmatb = vkT*vk
-	tempmatb = multAB(v, 1, l, v, l, 1,0,0);
-	//tempmata = tempmata/tempmatb[0]
-	for(i = 0; i < (l * l); i ++)
-		tempmata[i] /= tempmatb[0];
-	//tempmata = tempmata * A
-	deleteMatrix(tempmatb);
-	tempmatb = tempmata;
-	tempmata = multAB(tempmata, l, l, mat, m, n, 0, k);
-	deleteMatrix(tempmatb);
-	//mat += tempmata
-	matplus(mat, m, n, tempmata, l, n-k, k, 0);
-	deleteMatrix(tempmata);
-}*/
 /**
  * \brief Computes a Householder reflector \f$v\f$ of a vector \f$x\f$
  *
@@ -193,15 +164,11 @@ double* calcvk(double* x, int l)
 		vk[i] = x[i];
 
 	sign = vk[0] >= 0.0 ? 1 : -1;
-	//printf("vk %2.2f s:%d\n",vk[0],sign);
 
 	vk2norm = do2norm(vk, l);
 	toadd = sign * vk2norm;
 	div = 1/(x[0]+toadd);
 	
-	//vk[0] += toadd;
-
-	//vk = normalisev(vk, l, vk2norm);
 	for(i = 1; i < l; i++)
 		vk[i] *= div;
 
@@ -235,7 +202,7 @@ double* normalisev(double* v, int l, double norm)
   
   Computes the 2-norm by computing the following: \f[\textrm{2-norm}=\sqrt_0^lx(i)^2\f]
  */
-double do2norm(double* x, int l)//computes sqrt(sum(x[i]^2)) (2-norm)
+double do2norm(double* x, int l)
 {
 	double sum = 0, norm;
 	int i;
@@ -248,9 +215,9 @@ double do2norm(double* x, int l)//computes sqrt(sum(x[i]^2)) (2-norm)
 	return norm;
 }
 
-double* multAB(double* matQ, int mq, int nq, double* matA, int ma, int na, int offseta, int offsetb)
+double* multAB(double* matQ, int mq, int nq, double* matA, int ma, int na)
 {
-	double* matC;
+	double* matC = NULL;
 	int i, j, k;
 	matC = newMatrix(matC, mq, na);
 	initMatrix(matC, mq, na, 0);
@@ -259,11 +226,9 @@ double* multAB(double* matQ, int mq, int nq, double* matA, int ma, int na, int o
 	{
 		for(k = 0; k < nq; k++)
 		{
-			//execute the following na*nq times
 			for(i = 0; i < mq; i++)
 			{
-				matC[CO(i,j,mq)] += matQ[CO((i+offseta),(k+offseta),mq)] * matA[CO((k+offsetb),(j+offsetb),ma)];
-				//printf("%d:%d:%d\n", CO(i,j,mq), CO(i,k,mq), CO(k,j,ma));
+				matC[CO(i,j,mq)] += matQ[CO((i),(k),mq)] * matA[CO((k),(j),ma)];
 			}
 		}
 	}
@@ -273,7 +238,7 @@ double* multAB(double* matQ, int mq, int nq, double* matA, int ma, int na, int o
 
 void printMatrix(double* mat, int m, int n)
 {
-	int r, c, i;
+	int r, c;
 	putchar('{');
 	for(r = 0; r < m; r++)
 	{
@@ -291,7 +256,7 @@ void printMatrix(double* mat, int m, int n)
 	printf("}\n");
 }
 
-void initMatrix(double* mat, int m, int n, int mode)//matQ[c*m + r] = element at matQ row r column c - column major format
+void initMatrix(double* mat, int m, int n, int mode)
 {
 	int r, c;
 
@@ -314,7 +279,7 @@ void deleteMatrix(double* matptr)
 	free(matptr);
 }
 
-double* newMatrix(double* matptr, int m, int n)//allocates m x n doubles into matptr
+double* newMatrix(double* matptr, int m, int n)
 {
 	matptr = malloc(m * n * sizeof(double));
 
