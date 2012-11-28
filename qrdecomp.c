@@ -9,43 +9,43 @@
 #include "qrdecomp.h"
 
 #define CO(i,j,m) ((m * j) + i)
-#define TIMES 1
+#define ZERO 0
+#define RAND 1
+#define EYE 2
 
 int main	(int argc,
 		char* argv[])
 {
-	double* matQ = NULL, *matA = NULL, **hhVectors;
-	int mq = 5, nq = mq, ma = 4, na = 2, b = 2;
+	double* matA = NULL, **hhVectors;
+	int ma = 4, na = 2, b = 2;
 
 	srand(5);
 
-	matQ = newMatrix(matQ, mq, nq);
 	matA = newMatrix(matA, ma, na);
 
-	initMatrix(matQ, mq, nq, 1);
 	initMatrix(matA, ma, na, 1);
 
 	printMatrix(matA, ma, na, ma);
-	printf("\n");
-	//printMatrix(matA, ma, na);
-
-	//matC = multAB(matQ, mq, nq, matA, ma, na,0,0);
 
 	allocVectors(&hhVectors, ma, na);
 	
-	//printMatrix(matC, mq, na);
-	//hhQR(matA, na, na, ma);
 	//qRSingleBlock(matA, 2*b,b, ma, hhVectors);
 	qRDoubleBlock(matA, b, b, matA + 2, b, ma, hhVectors);
+
 	printMatrix(matA, ma, na, ma);
-	//printf("R =\n");
-	//printMatrix(matQ, mq, nq);
-	deleteMatrix(matQ);
+
 	deleteMatrix(matA);
-	//deleteMatrix(matC);
+
 	return 0;
 }
 
+/**
+ * \brief Allocates storage for n householder vectors in a triangular array
+ * \param hhVectors A pointer to the location to allocate the storage
+ * \param m The number of rows to allocate for
+ * \param n The number of vectors to allocate
+ * \returns void
+ */
 void allocVectors	(double*** hhVectors,
 			int m,
 			int n)
@@ -61,10 +61,8 @@ void allocVectors	(double*** hhVectors,
 }
 
 /**
- * \brief Computes the QR decomposition of a block
- * 
- * Computes the QR decomposition of an \f$m\times n\f$ block in place and stores the householder reflectors
- * in a pre-allocated triangular array, passed as an argument.
+ * \brief Computes the QR decomposition of a single block within a matrix
+ *
  * \param block A pointer to the first element of the block
  * \param m The number of rows in the block
  * \param n The number of columns in the block
@@ -88,6 +86,7 @@ void qRSingleBlock	(double* block,
 	{
 		//x = matA(k:m,k)
 		xVect = block + CO(k,k,ldb);//xVect is defo column vector from k -> b-k in column k of block
+
 		//vk = sign(x[1])||x||_2e1 + x
 		//vk = vk/||vk||_2
 		calcvkSingle(xVect, m - k, hhVectors[k]);
@@ -128,9 +127,6 @@ void qRDoubleBlock	(double* blockA,
 	int k;
 	double* xVectB, *xVectA;
 
-	printMatrix(blockA, am, an, ldm);
-	printMatrix(blockB, bm, an, ldm);
-
 	for(k = 0; k < an; k++)
 	{
 		//x = matA(k:m,k)
@@ -142,25 +138,22 @@ void qRDoubleBlock	(double* blockA,
 		calcvkDouble(xVectA, am - k, xVectB, bm, (bm + am) - k, hhVectors[k]);
 
 		//matA(k:ma,k:na) = matA(k:ma,k:na) - 2((vk*vk.T)/(vk.T*vk))*matA(k:ma,k:na)
-		//updateMatHHQRInPlace(block, k, m, n, ldb, hhVectors[k], m - k);
 		updateDoubleQ(blockA, k, am, an, blockB, bm, ldm, hhVectors[k], (am + bm) - k);//update top block
 	}
-	
-	printMatrix(blockA, am, an, ldm);
-	printMatrix(blockB, bm, an, ldm);
 }
 
 /** 
  * \brief Applies precomputed householder vectors to a single block within a matrix
  * 
- * Applies the computed householder vectors to a single block of a matrix in place:
+ * Applies the computed householder vectors to a single block of a matrix :
  * \f[Q_1Q_2\ldots Q_nM = QM\f]
  *
  * \param block A pointer to the first element of the block to apply the vectors to
  * \param m The number of rows in the block
  * \param n The number of columns in the block
  * \param ldb The leading dimension of the main matrix
- * \param hhVectors A pointer to a triangular array containing n householder vectors 
+ * \param hhVectors A pointer to a triangular array containing n householder vectors
+ * \returns void
  */
 void applySingleBlock	(double* block,
 			int m,
@@ -179,6 +172,7 @@ void applySingleBlock	(double* block,
  * 
  * Applies the n precomputed householder vectors to the rectangular matrix
  * formed by coupling blockA on top of blockB.
+ *
  * \param blockA A pointer to the first element of the "top" block in the coupling
  * \param am The number of rows in blockA
  * \param blockB A pointer to the first element of the "bottom" block in the coupling
@@ -186,6 +180,7 @@ void applySingleBlock	(double* block,
  * \param n The number of columns in the coupling
  * \param ldm The leading dimension of the matrix where both blocks reside
  * \param hhVectors A pointer to a triangular array containing n householder vectors
+ * \returns void
  */
 void applyDoubleBlock	(double* blockA,
 			int am,
@@ -203,65 +198,20 @@ void applyDoubleBlock	(double* blockA,
 }
 
 /**
- * \brief Computes the \f$QR\f$ decomposition of the \f$b\times b\f$ portion of a matrix stored at matA
+ * \brief Applies the householder update to a coupled matrix
+ * 
+ * Computes the update: \f[a_{ij} = a_{ij} + \left(v_i\frac{-2}{\sum_{k=1}^mv_k^2}\right)\left(\sum_{k=1}^ma_{kj}v_k\right)\f] for a matrix constructed by coupling two blocks
  *
- * \param matA A matrix in column-major order as a pointer to an array
- * \param m The number of rows in the matrix as stored
- * \param n The number of columns in the matrix as stored
- * \param lda The number of rows of the matrix as stored in memory
- * \returns A freshly allocated pointer to a matrix of pointers containing the householder reflectors from the decomposition.
- */
-double** hhQR		(double* matA,
-			int m,
-			int n,
-			int lda)//returns Q and triangularises matA in place.
-{
-	int k;
-	double* xVect, **v = malloc(n * sizeof(double*));
-	double* matQ = NULL;//, *matAgain;
-	matQ = newMatrix(matQ, m, n);
-	initMatrix(matQ, m, n, 2);
-
-	for(k = 0; k < n; k++)
-	{
-		//x = matA(k:m,k)
-		xVect = matA + CO(k,k,lda);//xVect is defo column vector from k -> b-k in column k of block
-
-		//vk = sign(x[1])||x||_2e1 + x
-		//vk = vk/||vk||_2
-		v[k] = calcvk(xVect, m - k);
-
-		//matA(k:ma,k:na) = matA(k:ma,k:na) - 2((vk*vk.T)/(vk.T*vk))*matA(k:ma,k:na)
-		updateMatHHQRInPlace(matA, k, m, n, lda, v[k], m - k);
-	}
-
-	/*for(k = n - 1; k > -1; k --)
-	{
-		updateMatHHQRInPlace(matQ, k, m, n, b, n, v[k], m - k);
-		free(v[k]);
-	}*/
-	printMatrix(matA, m, n, lda);
-	//printMatrix(matQ, m, n);
-
-	/*matAgain = multAB(matQ, m, n, m, matA, n, n, lda, 0);
-	printMatrix(matAgain, m, n);*/
-	
-	free(v);
-	return v;
-}
-
-/**
- * \brief Applies the householder update to the matrix
- * 
- * Computes the update: \f[a_{ij} = a_{ij} + \left(v_i\frac{-2}{\sum_{k=1}^mv_k^2}\right)\left(\sum_{k=1}^ma_{kj}v_k\right)\f]
- * 
- * \param mat Matrix of size \f$m \times n\f$
- * \param koffset The offset diagonally into the block, defining the subblock \f$A^{\prime}(k:b,k:b)\f$
- * \param m The number of rows in the matrix as stored
- * \param n The number of columns in the matrix as stored
- * \param b The block size in the matrix
- * \param v Pointer to an array containing the Householder reflector \f$v\f$
- * \param l The number of elements in \f$v\f$
+ * \param matA Top portion of coupling
+ * \param koffset The offset diagonally into the top block
+ * \param ma The number of rows in the top block
+ * \param na The number of columns in the coupling 
+ * \param matB Lower portion of coupling
+ * \param mb The number of rows in the lower portion
+ * \param ldm The leading dimension of the matrix in memory
+ * \param v Pointer to an array containing the Householder reflector
+ * \param l The number of elements in v
+ * \returns void
  */
 
 void updateDoubleQ	(double* matA,
@@ -280,25 +230,28 @@ void updateDoubleQ	(double* matA,
 	//Calculate y := -2/(sum(v[k]^2)) (lines 2-5 in Algorithm 1)
 	for(k = 0; k < rows; k ++)
 		y += (v[k] * v[k]);
-	//y=1;
+
 	y = -2/y;
 
 	for(j = 0; j < cols; j ++)
 	{
 		//calculate z := sum(a(k,j) * v[k]) (lines 7 - 10 in Algorithm 1)
 		z = 0;
+		//do for top portion
 		for(k = 0; k < rowsA; k ++)
 			z += matA[CO((k+koffset),(j+koffset),ldm)] * v[k];
+		//then for lower
 		for(; k < rows; k ++)
 			z += matB[CO(((k-ma)+koffset),(j+koffset),ldm)] * v[k];
 
-		//apply A(i,j) := A(i,j) + v[i] * y * z (lines 11 - 15 in Algorithm 1)
+		//apply A(i,j) := A(i,j) + v[i] * y * z for top portion (lines 11 - 15 in Algorithm 1)
 		for(i = 0; i < rowsA; i ++)
 		{
 			a = y * z;
 			a *= v[i];
 			matA[CO((i+koffset),(j+koffset),ldm)] += a;
 		}
+		//then for the lower one
 		for(; i < rows; i ++)
 		{
 			a = y * z;
@@ -307,7 +260,7 @@ void updateDoubleQ	(double* matA,
 		}
 	}
 }/**
- * \brief Applies the householder update to the matrix
+ * \brief Applies the householder update a single block
  * 
  * Computes the update: \f[a_{ij} = a_{ij} + \left(v_i\frac{-2}{\sum_{k=1}^mv_k^2}\right)\left(\sum_{k=1}^ma_{kj}v_k\right)\f]
  * 
@@ -315,9 +268,10 @@ void updateDoubleQ	(double* matA,
  * \param koffset The offset diagonally into the block, defining the subblock \f$A^{\prime}(k:b,k:b)\f$
  * \param m The number of rows in the matrix as stored
  * \param n The number of columns in the matrix as stored
- * \param b The block size in the matrix
+ * \param ldm The leading dimension of mat in memory
  * \param v Pointer to an array containing the Householder reflector \f$v\f$
  * \param l The number of elements in \f$v\f$
+ * \returns void
  */
 
 void updateSingleQ	(double* mat,
@@ -334,7 +288,7 @@ void updateSingleQ	(double* mat,
 	//Calculate y := -2/(sum(v[k]^2)) (lines 2-5 in Algorithm 1)
 	for(k = 0; k < rows; k ++)
 		y += (v[k] * v[k]);
-	//y=1;
+
 	y = -2/y;
 
 	for(j = 0; j < cols; j ++)
@@ -355,62 +309,15 @@ void updateSingleQ	(double* mat,
 }
 
 /**
- * \brief Applies the householder update to the matrix
- * 
- * Computes the update: \f[a_{ij} = a_{ij} + \left(v_i\frac{-2}{\sum_{k=1}^mv_k^2}\right)\left(\sum_{k=1}^ma_{kj}v_k\right)\f]
- * 
- * \param mat Matrix of size \f$m \times n\f$
- * \param koffset The offset diagonally into the block, defining the subblock \f$A^{\prime}(k:b,k:b)\f$
- * \param m The number of rows in the matrix as stored
- * \param n The number of columns in the matrix as stored
- * \param b The block size in the matrix
- * \param v Pointer to an array containing the Householder reflector \f$v\f$
- * \param l The number of elements in \f$v\f$
- */
-
-void updateMatHHQRInPlace(double* mat,
-		int koffset,
-		int m,
-		int n,
-		int ldm,
-		double* v,
-		int l)
-{
-	int i, j, k, rows = m-koffset, cols = n-koffset;
-	double y = 0, z, a;
-
-	//Calculate y := -2/(sum(v[k]^2)) (lines 2-5 in Algorithm 1)
-	for(k = 0; k < rows; k ++)
-		y += (v[k] * v[k]);
-	//y=1;
-	y = -2/y;
-
-	for(j = 0; j < cols; j ++)
-	{
-		//calculate z := sum(a(k,j) * v[k]) (lines 7 - 10 in Algorithm 1)
-		z = 0;
-		for(k = 0; k < rows; k ++)
-			z += mat[CO((k+koffset),(j+koffset),ldm)] * v[k];
-
-		//apply A(i,j) := A(i,j) + v[i] * y * z (lines 11 - 15 in Algorithm 1)
-		for(i = 0; i < rows; i ++)
-		{
-			a = y * z;
-			a *= v[i];
-			mat[CO((i+koffset),(j+koffset),ldm)] += a;
-		}
-	}
-}
-/**
- * \brief Computes a Householder reflector \f$v\f$ of a vector \f$x\f$
+ * \brief Computes a Householder reflector \f$v\f$ of a vector \f$x\f$ for a single block
  *
  * Computes: \f[v = \textrm{sign}(x_1)||x||_2e_1+x\f]
  * Then normalises \f$v\f$: \f[v = \frac{v}{||v||_2}\f]
  * 
  * \param x Pointer to an array containing a column vector to compute the Householder reflector of
  * \param l The number of elements in \f$x\f$
- *
- * \returns A pointer to a newly allocated vector \f$v\f$, a Householder reflector of \f$x\f$
+ * \param vk A pointer to an allocated array to store the resulting vector
+ * \returns void
  */
 void calcvkSingle	(double* x,
 			int l,
@@ -443,9 +350,13 @@ void calcvkSingle	(double* x,
  * I.e that the length of the first vector is nonzero
  *
  * \param xa Pointer to the first array containing the first part of the column vector to compute the Householder reflector of
- * \param l The number of elements in \f$x\f$
+ * \param ma The number of elements in the top vector
+ * \param xb Pointer to the lower vector
+ * \param mb The number of elements in the lower vector
+ * \param l The number of elements in the householder vector
+ * \param vk A pointer to a pre-allocated array to store the householder vector in
  *
- * \returns A pointer to a newly allocated vector \f$v\f$, a Householder reflector of \f$x\f$
+ * \returns void
  */
 void calcvkDouble	(double* xa,
 			int ma,
@@ -473,41 +384,6 @@ void calcvkDouble	(double* xa,
 		vk[i] *= div;
 
 	vk[0] = 1;
-}
-
-/**
- * \brief Computes a Householder reflector \f$v\f$ of a vector \f$x\f$
- *
- * Computes: \f[v = \textrm{sign}(x_1)||x||_2e_1+x\f]
- * Then normalises \f$v\f$: \f[v = \frac{v}{||v||_2}\f]
- * 
- * \param x Pointer to an array containing a column vector to compute the Householder reflector of
- * \param l The number of elements in \f$x\f$
- *
- * \returns A pointer to a newly allocated vector \f$v\f$, a Householder reflector of \f$x\f$
- */
-double* calcvk(double* x, int l)
-{
-	int sign, i;
-	double vk2norm, toadd, *vk, div;
-
-	vk = malloc(l * sizeof(double));
-
-	for(i = 0; i < l; i++)
-		vk[i] = x[i];
-
-	sign = vk[0] >= 0.0 ? 1 : -1;
-
-	vk2norm = do2norm(vk, l);
-	toadd = sign * vk2norm;
-	div = 1/(x[0]+toadd);
-	
-	for(i = 1; i < l; i++)
-		vk[i] *= div;
-
-	vk[0] = 1;
-
-	return vk;
 }
 
 /*
@@ -577,11 +453,11 @@ void initMatrix(double* mat, int m, int n, int mode)
 	{
 		for(r = 0; r < m; r++)
 		{
-			if(mode == 0)
+			if(mode == ZERO)
 				mat[CO(r,c,m)] = 0;
-			else if(mode == 1)
+			else if(mode == RAND)
 				mat[CO(r,c,m)] = rand() % (m * n);
-			else if(mode == 2)
+			else if(mode == EYE)
 				mat[CO(r,c,m)] = r == c ? 1 : 0;
 		}
 	}

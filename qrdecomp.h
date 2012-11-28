@@ -17,9 +17,4 @@ void calcvkDouble(double*, int, double*, int, int, double*);
 void updateSingleQ(double*, int, int, int, int, double*, int);
 void updateDoubleQ(double*, int, int, int, double*, int, int, double*, int);
 
-double** hhQR(double*, int, int, int);
-
-double* calcvk(double*, int);
 double do2norm(double*, int);
-double* normalisev(double*, int, double);
-void updateMatHHQRInPlace(double*, int, int, int, int, double*, int);
