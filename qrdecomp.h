@@ -1,3 +1,5 @@
+void blockQR(void);
+
 double* newMatrix(double*, int, int);
 void deleteMatrix(double*);
 void initMatrix(double*, int, int, int);
