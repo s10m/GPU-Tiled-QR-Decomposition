@@ -17,6 +17,7 @@ int main	(int argc,
 		char* argv[])
 {
 	blockQR();
+	srand(72);
 
 	return 0;
 }
@@ -24,7 +25,7 @@ int main	(int argc,
 void blockQR()
 {
 	double* matA = NULL, *matQ = NULL, **singleVectors, **doubleVectors;
-	int ma = 2, na = 2, b = 2, i, j ,k, p = ma/b, q = na/b, minpq = p < q ? p : q;
+	int ma = 8, na = 4, b = 2, i, j ,k, p = ma/b, q = na/b, minpq = p < q ? p : q;
 
 	matA = newMatrix(matA, ma, na);
 	matQ = newMatrix(matQ, ma, ma);
@@ -34,7 +35,7 @@ void blockQR()
 
 	printMatrix(matA, ma, na, ma);
 	allocVectors(&singleVectors, ma, na);
-	allocVectors(&doubleVectors, 2*b, b);
+	allocVectors(&doubleVectors, ma, na);//2*b, b);
 
 	/*for(k = 0; k < minpq ; k ++)
 	{
@@ -57,12 +58,13 @@ void blockQR()
 		}
 	}*/
 
+	//qRDoubleBlock(matA, 4, 4, matA + 4, 4, ma, singleVectors);
 	qRSingleBlock(matA, ma, na, ma, singleVectors);
-	applySingleBlock(matQ, ma, ma, ma, singleVectors);
+	applySingleBlock(matQ, ma, na, ma, singleVectors);
 
 	printMatrix(matA, ma, na, ma);
 	printMatrix(matQ, ma, ma, ma);
-	printMatrix(multAB(matQ, ma, ma, ma, matA, ma, na, ma, 0), ma, na, ma);
+	/*printMatrix(multAB(matQ, ma, ma, ma, matA, ma, na, ma, 0), ma, na, ma);*/
 
 	deleteMatrix(matA);
 }
@@ -114,13 +116,14 @@ void qRSingleBlock	(double* block,
 	{
 		//x = matA(k:m,k)
 		xVect = block + CO(k,k,ldb);//xVect is column vector from k -> b-k in column k of block
-		printMatrix(xVect, m-k, 1, ldb);
 		//vk = sign(x[1])||x||_2e1 + x
 		//vk = vk/||vk||_2
 		calcvkSingle(xVect, m - k, hhVectors[k]);
+		printMatrix(hhVectors[k], m-k, 1, m-k);
 
 		//matA(k:ma,k:na) = matA(k:ma,k:na) - 2((vk*vk.T)/(vk.T*vk))*matA(k:ma,k:na)
-		updateSingleQ(block, k, m, n, ldb, hhVectors[k], m - k);
+		updateSingleQ(block+CO(k,k,ldb), m-k, n-k, ldb, hhVectors[k]);
+		//updateDoubleQ(block+CO(k,k,ldb), -k, 
 	}
 
 	//printMatrix(block, m, n, ldb);
@@ -155,8 +158,8 @@ void qRDoubleBlock	(double* blockA,
 	int k;
 	double* xVectB, *xVectA;
 
-	/*printMatrix(blockA, am, an, ldm);
-	printMatrix(blockB, bm, an, ldm);*/
+	printMatrix(blockA, am, an, ldm);
+	printMatrix(blockB, bm, an, ldm);
 
 	for(k = 0; k < an; k++)
 	{
@@ -167,9 +170,10 @@ void qRDoubleBlock	(double* blockA,
 		//vk = sign(x[1])||x||_2e1 + x
 		//vk = vk/||vk||_2
 		calcvkDouble(xVectA, am - k, xVectB, bm, (bm + am) - k, hhVectors[k]);
+		printMatrix(hhVectors[k], (am+bm)-k, 1, (am+bm)-k);
 
 		//matA(k:ma,k:na) = matA(k:ma,k:na) - 2((vk*vk.T)/(vk.T*vk))*matA(k:ma,k:na)
-		updateDoubleQ(blockA, k, am, an, blockB, bm, ldm, hhVectors[k], (am + bm) - k);//update top block
+		updateDoubleQ(blockA + CO(k,k,ldm), am - k, an, blockB + CO(0,k,ldm), bm, ldm, hhVectors[k], (am + bm) - k);//update top block
 	}
 
 	/*printMatrix(blockA, am, an, ldm);
@@ -198,8 +202,10 @@ void applySingleBlock	(double* block,
 	int h, k;
 	for(h = 0; h < m; h ++)
 	{
-		for(k = (n-1); k > -1; k --)
-			updateSingleQ(block + CO(0,h,ldb), k, m, 1, ldb, hhVectors[k], m - k);
+		for(k = n-1; k > -1; k --)
+		{
+			updateSingleQ(block + CO(k,h,ldb), m - k, 1, ldb, hhVectors[k]);
+		}
 	}
 }
 
@@ -229,8 +235,8 @@ void applyDoubleBlock	(double* blockA,
 	int h, k;
 	for(h = 0; h < am; h ++)
 	{
-		for(k = (n-1); k > -1; k --)
-			updateDoubleQ(blockA+CO(0,h,ldm), k, am, 1, blockB+CO(0,h,ldm), bm, ldm, hhVectors[k], (am + bm) - k);
+		for(k = n - 1; k > -1; k --)
+			updateDoubleQ(blockA + CO(k,h,ldm), am - k, 1, blockB+CO(0,h,ldm), bm, ldm, hhVectors[k], (am + bm) - k);
 	}
 	
 }
@@ -241,7 +247,6 @@ void applyDoubleBlock	(double* blockA,
  * Computes the update: \f[a_{ij} = a_{ij} + \left(v_i\frac{-2}{\sum_{k=1}^mv_k^2}\right)\left(\sum_{k=1}^ma_{kj}v_k\right)\f] for a matrix constructed by coupling two blocks
  *
  * \param matA Top portion of coupling
- * \param koffset The offset diagonally into the top block
  * \param ma The number of rows in the top block
  * \param na The number of columns in the coupling 
  * \param matB Lower portion of coupling
@@ -253,7 +258,6 @@ void applyDoubleBlock	(double* blockA,
  */
 
 void updateDoubleQ	(double* matA,
-			int koffset,
 			int ma,
 			int na,
 			double* matB,
@@ -262,14 +266,8 @@ void updateDoubleQ	(double* matA,
 			double* v,
 			int l)
 {
-	int i, j, k, rows = l, cols = na-koffset, rowsA = l - mb;
-	double y = 0, z, a;
-
-	//Calculate y := -2/(sum(v[k]^2)) (lines 2-5 in Algorithm 1)
-	/*for(k = 0; k < rows; k ++)
-		y += (v[k] * v[k]);
-
-	y = -2/y;*/
+	int i, j, k, rows = ma + mb, cols = na, rowsA = ma;
+	double z, a;
 
 	for(j = 0; j < cols; j ++)
 	{
@@ -277,72 +275,65 @@ void updateDoubleQ	(double* matA,
 		z = 0;
 		//do for top portion
 		for(k = 0; k < rowsA; k ++)
-			z += matA[CO((k+koffset),(j+koffset),ldm)] * v[k];
+			z += matA[CO(k,j,ldm)] * v[k];
 		//then for lower
 		for(; k < rows; k ++)
-			z += matB[CO(((k-ma)+koffset),(j+koffset),ldm)] * v[k];
+			z += matB[CO((k-ma),j,ldm)] * v[k];
 
 		//apply A(i,j) := A(i,j) + v[i] * y * z for top portion (lines 11 - 15 in Algorithm 1)
 		for(i = 0; i < rowsA; i ++)
 		{
 			a = -2 * z;
 			a *= v[i];
-			matA[CO((i+koffset),(j+koffset),ldm)] += a;
+			matA[CO(i,j,ldm)] += a;
 		}
 		//then for the lower one
 		for(; i < rows; i ++)
 		{
 			a = -2 * z;
 			a *= v[i];
-			matB[CO(((i-ma)+koffset),(j+koffset),ldm)] += a;
+			matB[CO((i-ma),j,ldm)] += a;
 		}
 	}
-}/**
+}
+
+/**
  * \brief Applies the householder update a single block
  * 
  * Computes the update: \f[a_{ij} = a_{ij} + \left(v_i\frac{-2}{\sum_{k=1}^mv_k^2}\right)\left(\sum_{k=1}^ma_{kj}v_k\right)\f]
  * 
  * \param mat Matrix of size \f$m \times n\f$
- * \param koffset The offset diagonally into the block, defining the subblock \f$A^{\prime}(k:m,k:n)\f$
  * \param m The number of rows in the matrix
  * \param n The number of columns in the matrix
  * \param ldm The leading dimension of mat in memory
  * \param v Pointer to an array containing the Householder reflector \f$v\f$
- * \param l The number of elements in \f$v\f$
  * \returns void
  */
 void updateSingleQ	(double* mat,
-			int koffset,
 			int m,
 			int n,
 			int ldm,
-			double* v,
-			int l)
+			double* v)
 {
-	int i, j, k, rows = m-koffset, cols = n-koffset;
+	int i, j, k;
 	double y = 0, z, a;
 
-	//Calculate y := -2/(sum(v[k]^2)) (lines 2-5 in Algorithm 1)
-	/*for(k = 0; k < rows; k ++)
-		y += (v[k] * v[k]);
-
-	y = -2/y;*/
-
-	for(j = 0; j < cols; j ++)
+	for(j = 0; j < n; j ++)
 	{
 		//calculate z := sum(a(k,j) * v[k]) (lines 7 - 10 in Algorithm 1)
 		z = 0;
-		for(k = 0; k < rows; k ++)
-			z += mat[CO((k+koffset),(j+koffset),ldm)] * v[k];
+		for(k = 0; k < m; k ++)
+			z += mat[CO(k,j,ldm)] * v[k];
 
 		//apply A(i,j) := A(i,j) + v[i] * y * z (lines 11 - 15 in Algorithm 1)
-		for(i = 0; i < rows; i ++)
+		for(i = 0; i < m; i ++)
 		{
 			a = -2 * z;
 			a *= v[i];
-			mat[CO((i+koffset),(j+koffset),ldm)] += a;
+			mat[CO(i,j,ldm)] += a;
 		}
 	}
+	//printMatrix(mat, m, n, ldm);
 }
 
 /**
@@ -363,15 +354,17 @@ void calcvkSingle	(double* x,
 	int sign, i;
 	double norm, div;
 
+	sign = x[0] >= 0.0 ? 1 : -1;
+
 	for(i = 0; i < l; i++)
 		vk[i] = x[i];
 
-	sign = vk[0] >= 0.0 ? 1 : -1;
-
-	norm = do2norm(x, l);
-	vk[0] += sign * norm;
-	printf("normd: %5.2f\n", vk[0]);
 	norm = do2norm(vk, l);
+	printf("%5.2f ", norm);
+	vk[0] += norm * sign;
+
+	norm = do2norm(vk, l);
+	printf("%5.2f\n", vk[0]);
 
 	if(norm != 0.0)
 	{
@@ -380,9 +373,6 @@ void calcvkSingle	(double* x,
 		for(i = 0; i < l; i++)
 			vk[i] *= div;
 	}
-	printMatrix(vk,l,1,l);
-
-
 }
 
 /**
@@ -409,7 +399,9 @@ void calcvkDouble	(double* xa,
 			double* vk)
 {
 	int sign, i;
-	double norm, toadd, div;
+	double norm, div;
+
+	sign = xa[0] >= 0.0 ? 1 : -1;
 
 	for(i = 0; i < ma; i++)
 		vk[i] = xa[i];
@@ -417,17 +409,17 @@ void calcvkDouble	(double* xa,
 	for(; i < l; i++)
 		vk[i] = xb[i - ma];
 
-	sign = vk[0] >= 0.0 ? 1 : -1;
-
 	norm = do2norm(vk, l);
-	vk[0] += sign * norm;
+	printf("%5.2f ", norm);
+	vk[0] += norm * sign;
 	norm = do2norm(vk,l);
+	printf("%5.2f\n", vk[0]);
 
 	if(norm != 0.0)
 	{
 		div = 1/norm;
 	
-		for(i = 1; i < l; i++)
+		for(i = 0; i < l; i++)
 			vk[i] *= div;
 	}
 }
@@ -474,21 +466,16 @@ double* multAB(double* matA, int ma, int na, int lda, double* matB, int mb, int 
 void printMatrix(double* mat, int m, int n, int ldm)
 {
 	int r, c;
-	putchar('{');
+	putchar('[');
 	for(r = 0; r < m; r++)
 	{
-		putchar('{');
 		for(c = 0; c < n; c++)
 		{
-			printf("%7.2f", mat[CO(r,c,ldm)]);
-			if(c != n-1)
-				putchar(',');
+			printf(" %7.2f", mat[CO(r,c,ldm)]);
 		}
-		putchar('}');
-		if(r != m-1)
-			putchar(',');
+		putchar(';');
 	}
-	printf("}\n");
+	printf("]\n");
 }
 
 void initMatrix(double* mat, int m, int n, int mode)

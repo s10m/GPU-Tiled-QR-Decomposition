@@ -16,7 +16,7 @@ void allocVectors(double***, int, int);
 void calcvkSingle(double*, int, double*);
 void calcvkDouble(double*, int, double*, int, int, double*);
 
-void updateSingleQ(double*, int, int, int, int, double*, int);
-void updateDoubleQ(double*, int, int, int, double*, int, int, double*, int);
+void updateSingleQ(double*, int, int, int, double*);
+void updateDoubleQ(double*, int, int, double*, int, int, double*, int);
 
 double do2norm(double*, int);
