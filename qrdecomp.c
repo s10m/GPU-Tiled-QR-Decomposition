@@ -9,6 +9,7 @@
 #include "qrdecomp.h"
 
 #define CO(i,j,m) ((m * j) + i)
+#define COB(i,j,m) (sizeof(double)*(((m)*(j) + (i))))
 #define ZERO 0
 #define RAND 1
 #define EYE 2
@@ -17,27 +18,38 @@ int main	(int argc,
 		char* argv[])
 {
 	blockQR();
-	srand(72);
 
 	return 0;
 }
 
 void blockQR()
 {
-	double* matA = NULL, *matQ = NULL, **singleVectors, **doubleVectors;
+	double* matA = NULL,* matAs = NULL, *matQs = NULL, *matAd = NULL, *matQd = NULL, **singleVectors, **doubleVectors;
 	int ma = 8, na = 4, b = 2, i, j ,k, p = ma/b, q = na/b, minpq = p < q ? p : q;
 
+	matAs = newMatrix(matAs, ma, na);
+	matAd = newMatrix(matAd, ma, na);
+	matQs = newMatrix(matQs, ma, ma);
+	matQd = newMatrix(matQd, ma, ma);
 	matA = newMatrix(matA, ma, na);
-	matQ = newMatrix(matQ, ma, ma);
 
+	srand(5);
 	initMatrix(matA, ma, na, RAND);
-	initMatrix(matQ, ma, ma, EYE);
+	srand(5);
+	initMatrix(matAs, ma, na, RAND);
+	initMatrix(matQs, ma, ma, EYE);
+	srand(5);
+	initMatrix(matAd, ma, na, RAND);
+	initMatrix(matQd, ma, ma, EYE);
 
-	printMatrix(matA, ma, na, ma);
+	printMatrix(matAs, ma, na, ma);
+	printMatrix(matAd, ma, na, ma);
 	allocVectors(&singleVectors, ma, na);
 	allocVectors(&doubleVectors, ma, na);//2*b, b);
+	printf("A:");
+	printMatrix(matA, ma, na, ma);
 
-	/*for(k = 0; k < minpq ; k ++)
+	for(k = 0; k < minpq ; k ++)
 	{
 		qRSingleBlock(matA + CO((k*b),(k*b),ma), b, b, ma, singleVectors);
 
@@ -56,16 +68,28 @@ void blockQR()
 				applyDoubleBlock(matA + CO((k*b),(j*b),ma), b, matA + CO((i*b),(j*b),ma), b, b, ma, doubleVectors);
 			}
 		}
-	}*/
+	}
+	/*qRDoubleBlock(matAd, 4, 4, matAd + 4, 4, ma, doubleVectors);
+	applySingleBlock(matQd, ma, na, ma, doubleVectors);*/
 
-	//qRDoubleBlock(matA, 4, 4, matA + 4, 4, ma, singleVectors);
-	qRSingleBlock(matA, ma, na, ma, singleVectors);
-	applySingleBlock(matQ, ma, na, ma, singleVectors);
+	qRSingleBlock(matAs, ma, na, ma, singleVectors);
+	applySingleBlock(matQs, ma, na, ma, singleVectors);
+	
+	/*printf("double: ");
+	printMatrix(matAd, ma, na, ma);
+	printMatrix(matQd, ma, ma, ma);
+	printMatrix(multAB(matQd, ma, ma, ma, matAd, ma, na, ma, 0), ma, na, ma);*/
 
+	printf("single: ");
+	printMatrix(matAs, ma, na, ma);
+	printMatrix(matQs, ma, ma, ma);
+	printMatrix(multAB(matQs, ma, ma, ma, matAs, ma, na, ma, 0), ma, na, ma);
+	
+	printf("tiled: ");
 	printMatrix(matA, ma, na, ma);
-	printMatrix(matQ, ma, ma, ma);
-	/*printMatrix(multAB(matQ, ma, ma, ma, matA, ma, na, ma, 0), ma, na, ma);*/
 
+	deleteMatrix(matAs);
+	deleteMatrix(matAd);
 	deleteMatrix(matA);
 }
 
@@ -119,7 +143,8 @@ void qRSingleBlock	(double* block,
 		//vk = sign(x[1])||x||_2e1 + x
 		//vk = vk/||vk||_2
 		calcvkSingle(xVect, m - k, hhVectors[k]);
-		printMatrix(hhVectors[k], m-k, 1, m-k);
+		/*printf("Householder vector %d: ", k);
+		printMatrix(hhVectors[k], m-k, 1, m-k);*/
 
 		//matA(k:ma,k:na) = matA(k:ma,k:na) - 2((vk*vk.T)/(vk.T*vk))*matA(k:ma,k:na)
 		updateSingleQ(block+CO(k,k,ldb), m-k, n-k, ldb, hhVectors[k]);
@@ -158,8 +183,8 @@ void qRDoubleBlock	(double* blockA,
 	int k;
 	double* xVectB, *xVectA;
 
-	printMatrix(blockA, am, an, ldm);
-	printMatrix(blockB, bm, an, ldm);
+	/*printMatrix(blockA, am, an, ldm);
+	printMatrix(blockB, bm, an, ldm);*/
 
 	for(k = 0; k < an; k++)
 	{
@@ -170,10 +195,11 @@ void qRDoubleBlock	(double* blockA,
 		//vk = sign(x[1])||x||_2e1 + x
 		//vk = vk/||vk||_2
 		calcvkDouble(xVectA, am - k, xVectB, bm, (bm + am) - k, hhVectors[k]);
-		printMatrix(hhVectors[k], (am+bm)-k, 1, (am+bm)-k);
+		/*printf("Householder vector %d: ", k);
+		printMatrix(hhVectors[k], (am+bm)-k, 1, (am+bm)-k);*/
 
 		//matA(k:ma,k:na) = matA(k:ma,k:na) - 2((vk*vk.T)/(vk.T*vk))*matA(k:ma,k:na)
-		updateDoubleQ(blockA + CO(k,k,ldm), am - k, an, blockB + CO(0,k,ldm), bm, ldm, hhVectors[k], (am + bm) - k);//update top block
+		updateDoubleQ(xVectA, am - k, an - k, xVectB, bm, ldm, hhVectors[k], (am + bm) - k);//update top block
 	}
 
 	/*printMatrix(blockA, am, an, ldm);
@@ -202,7 +228,7 @@ void applySingleBlock	(double* block,
 	int h, k;
 	for(h = 0; h < m; h ++)
 	{
-		for(k = n-1; k > -1; k --)
+		for(k = 0; k < n; k ++)
 		{
 			updateSingleQ(block + CO(k,h,ldb), m - k, 1, ldb, hhVectors[k]);
 		}
@@ -214,6 +240,7 @@ void applySingleBlock	(double* block,
  * 
  * Applies the n precomputed householder vectors to the rectangular matrix
  * formed by coupling blockA on top of blockB.
+ * Computes \f$Q\begin{bmatrix}B_a\\B_b\end{bmatrix}\f$
  *
  * \param blockA A pointer to the first element of the "top" block in the coupling
  * \param am The number of rows in blockA
@@ -235,7 +262,7 @@ void applyDoubleBlock	(double* blockA,
 	int h, k;
 	for(h = 0; h < am; h ++)
 	{
-		for(k = n - 1; k > -1; k --)
+		for(k = 0; k < n; k ++)
 			updateDoubleQ(blockA + CO(k,h,ldm), am - k, 1, blockB+CO(0,h,ldm), bm, ldm, hhVectors[k], (am + bm) - k);
 	}
 	
@@ -316,7 +343,7 @@ void updateSingleQ	(double* mat,
 			double* v)
 {
 	int i, j, k;
-	double y = 0, z, a;
+	double z, a;
 
 	for(j = 0; j < n; j ++)
 	{
@@ -504,6 +531,5 @@ void deleteMatrix(double* matptr)
 double* newMatrix(double* matptr, int m, int n)
 {
 	matptr = malloc(m * n * sizeof(double));
-
 	return matptr;
 }
