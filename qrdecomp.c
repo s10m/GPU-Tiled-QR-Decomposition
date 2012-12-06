@@ -24,72 +24,50 @@ int main	(int argc,
 
 void blockQR()
 {
-	double* matA = NULL,* matAs = NULL, *matQs = NULL, *matAd = NULL, *matQd = NULL, **singleVectors, **doubleVectors;
-	int ma = 6, na = 6, b = 3, i, j ,k, p = ma/b, q = na/b, minpq = p < q ? p : q;
+	double* matA = NULL, ***singleVectors, ***doubleVectors;
+	int ma = 24, na = 12, b = 3, i, j ,k, p = ma/b, q = na/b, minpq = p < q ? p : q;
 
-	matAs = newMatrix(matAs, ma, na);
-	matAd = newMatrix(matAd, ma, na);
-	matQs = newMatrix(matQs, ma, ma);
-	matQd = newMatrix(matQd, ma, ma);
+	singleVectors = malloc(minpq * sizeof(double**));
+	doubleVectors = malloc((p-1) * (q-1) * sizeof(double**));
+
 	matA = newMatrix(matA, ma, na);
 
 	srand(5);
 	initMatrix(matA, ma, na, RAND);
-	srand(5);
-	initMatrix(matAs, ma, na, RAND);
-	initMatrix(matQs, ma, ma, EYE);
-	srand(5);
-	initMatrix(matAd, ma, na, RAND);
-	initMatrix(matQd, ma, ma, EYE);
 
-	printMatrix(matAs, ma, na, ma);
-	printMatrix(matAd, ma, na, ma);
-	allocVectors(&singleVectors, ma, na);
-	allocVectors(&doubleVectors, ma, na);//2*b, b);
+	//for(k = 0; k < minpq; k ++)
+		allocVectors(singleVectors, b, b);
+
+//	for(k = 0; k < (p-1) * (q-1); k ++)
+		allocVectors(doubleVectors, 2*b, b);
+
 	printf("A:");
 	printMatrix(matA, ma, na, ma);
 
 	for(k = 0; k < minpq ; k ++)
 	{
-		qRSingleBlock(matA + CO((k*b),(k*b),ma), b, b, ma, singleVectors);
+		qRSingleBlock(matA + CO((k*b),(k*b),ma), b, b, ma, *singleVectors);
 
 		for(j = k + 1; j < q; j ++)
 		{
-			applySingleBlock(matA + CO((k*b),(j*b),ma), b, b, ma, singleVectors);
+			applySingleBlock(matA + CO((k*b),(j*b),ma), b, b, ma, *singleVectors);
 		}
-		printMatrix(matA, ma, na, ma);
+		//printMatrix(matA, ma, na, ma);
 		
 		for(i = k + 1; i < p; i ++)
 		{
-			qRDoubleBlock(matA + CO((k*b),(k*b),ma), b, b, matA + CO((i*b),(k*b),ma), b, ma, doubleVectors);
+			qRDoubleBlock(matA + CO((k*b),(k*b),ma), b, b, matA + CO((i*b),(k*b),ma), b, ma, *doubleVectors);
 			
 			for(j = k + 1; j < q; j ++)
 			{
-				applyDoubleBlock(matA + CO((k*b),(j*b),ma), b, matA + CO((i*b),(j*b),ma), b, b, ma, doubleVectors);
+				applyDoubleBlock(matA + CO((k*b),(j*b),ma), b, matA + CO((i*b),(j*b),ma), b, b, ma, *doubleVectors);
 			}
 		}
 	}
-	/*qRDoubleBlock(matAd, 4, 4, matAd + 4, 4, ma, doubleVectors);
-	applySingleBlock(matQd, ma, na, ma, doubleVectors);*/
 
-	qRSingleBlock(matAs, ma, na, ma, singleVectors);
-	applySingleBlock(matQs, ma, na, ma, singleVectors);
-	
-	/*printf("double: ");
-	printMatrix(matAd, ma, na, ma);
-	printMatrix(matQd, ma, ma, ma);
-	printMatrix(multAB(matQd, ma, ma, ma, matAd, ma, na, ma, 0), ma, na, ma);*/
-
-	printf("single: ");
-	printMatrix(matAs, ma, na, ma);
-	printMatrix(matQs, ma, ma, ma);
-	printMatrix(multAB(matQs, ma, ma, ma, matAs, ma, na, ma, 0), ma, na, ma);
-	
-	printf("tiled: ");
+	printf("tiled R:\n");
 	printMatrix(matA, ma, na, ma);
 
-	deleteMatrix(matAs);
-	deleteMatrix(matAd);
 	deleteMatrix(matA);
 }
 
@@ -209,7 +187,7 @@ void qRDoubleBlock	(double* blockA,
  * \brief Applies precomputed householder vectors to a single block within a matrix
  * 
  * Applies the computed householder vectors to a single block of a matrix :
- * \f[Q_1Q_2\ldots Q_nM = QM\f]
+ * \f[Q_nQ_{n-1}\ldots Q_1A = Q^*A\f]
  *
  * \param block A pointer to the first element of the block to apply the vectors to
  * \param m The number of rows in the block
@@ -386,11 +364,11 @@ void calcvkSingle	(double* x,
 		vk[i] = x[i];
 
 	norm = do2norm(vk, l);
-	printf("%5.2f ", norm);
+	//printf("%5.2f ", norm);
 	vk[0] += norm * sign;
 
 	norm = do2norm(vk, l);
-	printf("%5.2f\n", vk[0]);
+	//printf("%5.2f\n", vk[0]);
 
 	if(norm != 0.0)
 	{
@@ -436,10 +414,10 @@ void calcvkDouble	(double* xa,
 		vk[i] = xb[i - ma];
 
 	norm = do2norm(vk, l);
-	printf("%5.2f ", norm);
+	//printf("%5.2f ", norm);
 	vk[0] += norm * sign;
 	norm = do2norm(vk,l);
-	printf("%5.2f\n", vk[0]);
+	//printf("%5.2f\n", vk[0]);
 
 	if(norm != 0.0)
 	{
@@ -499,7 +477,7 @@ void printMatrix(double* mat, int m, int n, int ldm)
 		{
 			printf(" %7.2f", mat[CO(r,c,ldm)]);
 		}
-		putchar(';');
+		putchar('\n');
 	}
 	printf("]\n");
 }
