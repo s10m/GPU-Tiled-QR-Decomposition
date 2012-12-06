@@ -25,7 +25,7 @@ int main	(int argc,
 void blockQR()
 {
 	double* matA = NULL,* matAs = NULL, *matQs = NULL, *matAd = NULL, *matQd = NULL, **singleVectors, **doubleVectors;
-	int ma = 8, na = 4, b = 2, i, j ,k, p = ma/b, q = na/b, minpq = p < q ? p : q;
+	int ma = 6, na = 6, b = 3, i, j ,k, p = ma/b, q = na/b, minpq = p < q ? p : q;
 
 	matAs = newMatrix(matAs, ma, na);
 	matAd = newMatrix(matAd, ma, na);
@@ -148,7 +148,6 @@ void qRSingleBlock	(double* block,
 
 		//matA(k:ma,k:na) = matA(k:ma,k:na) - 2((vk*vk.T)/(vk.T*vk))*matA(k:ma,k:na)
 		updateSingleQ(block+CO(k,k,ldb), m-k, n-k, ldb, hhVectors[k]);
-		//updateDoubleQ(block+CO(k,k,ldb), -k, 
 	}
 
 	//printMatrix(block, m, n, ldb);
