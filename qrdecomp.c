@@ -24,49 +24,53 @@ int main	(int argc,
 
 void blockQR()
 {
-	double* matA = NULL, ***singleVectors, ***doubleVectors;
-	int ma = 24, na = 12, b = 3, i, j ,k, p = ma/b, q = na/b, minpq = p < q ? p : q;
+	double* matA = NULL, *singleVectors = NULL, **doubleVectors, *rdiag = NULL;
+	int ma = 3, na = 3, b = 3, i, j ,k, p = ma/b, q = na/b, minpq = p < q ? p : q;
 
-	singleVectors = malloc(minpq * sizeof(double**));
-	doubleVectors = malloc((p-1) * (q-1) * sizeof(double**));
-
+	rdiag = newMatrix(rdiag, na, 1);
 	matA = newMatrix(matA, ma, na);
 
 	srand(5);
 	initMatrix(matA, ma, na, RAND);
 
-	//for(k = 0; k < minpq; k ++)
-		allocVectors(singleVectors, b, b);
+	singleVectors = newMatrix(singleVectors, b, b);
 
-//	for(k = 0; k < (p-1) * (q-1); k ++)
-		allocVectors(doubleVectors, 2*b, b);
+	allocVectors(&doubleVectors, 2*b, b);
 
-	printf("A:");
+	printf("A:\n");
 	printMatrix(matA, ma, na, ma);
 
 	for(k = 0; k < minpq ; k ++)
 	{
-		qRSingleBlock(matA + CO((k*b),(k*b),ma), b, b, ma, *singleVectors);
+		qRSingleBlock	(matA + CO((k*b),(k*b),ma), b, b,
+				ma, singleVectors, rdiag + (k*b));
 
 		for(j = k + 1; j < q; j ++)
 		{
-			applySingleBlock(matA + CO((k*b),(j*b),ma), b, b, ma, *singleVectors);
+			applySingleBlock(matA + CO((k*b),(j*b),ma), b, b,
+					ma, singleVectors);
 		}
 		//printMatrix(matA, ma, na, ma);
 		
 		for(i = k + 1; i < p; i ++)
 		{
-			qRDoubleBlock(matA + CO((k*b),(k*b),ma), b, b, matA + CO((i*b),(k*b),ma), b, ma, *doubleVectors);
+			qRDoubleBlock	(matA + CO((k*b),(k*b),ma), b, b,
+					matA + CO((i*b),(k*b),ma), b,
+					ma, doubleVectors, rdiag);
 			
 			for(j = k + 1; j < q; j ++)
 			{
-				applyDoubleBlock(matA + CO((k*b),(j*b),ma), b, matA + CO((i*b),(j*b),ma), b, b, ma, *doubleVectors);
+				applyDoubleBlock(matA + CO((k*b),(j*b),ma), b,
+						matA + CO((i*b),(j*b),ma), b, b,
+						ma, doubleVectors);
 			}
 		}
 	}
 
 	printf("tiled R:\n");
 	printMatrix(matA, ma, na, ma);
+	printf("diagonal of R:\n");
+	printMatrix(rdiag, na, 1, na);
 
 	deleteMatrix(matA);
 }
@@ -107,7 +111,8 @@ void qRSingleBlock	(double* block,
 			int m,
 			int n,
 			int ldb,
-			double** hhVectors)
+			double* hhVector,
+			double* diag)
 {
 	int k;
 	double* xVect;
@@ -120,14 +125,17 @@ void qRSingleBlock	(double* block,
 		xVect = block + CO(k,k,ldb);//xVect is column vector from k -> b-k in column k of block
 		//vk = sign(x[1])||x||_2e1 + x
 		//vk = vk/||vk||_2
-		calcvkSingle(xVect, m - k, hhVectors[k]);
+		calcvkSingle(xVect, m - k, hhVector);
 		/*printf("Householder vector %d: ", k);
 		printMatrix(hhVectors[k], m-k, 1, m-k);*/
 
 		//matA(k:ma,k:na) = matA(k:ma,k:na) - 2((vk*vk.T)/(vk.T*vk))*matA(k:ma,k:na)
-		updateSingleQ(block+CO(k,k,ldb), m-k, n-k, ldb, hhVectors[k]);
-	}
+		updateSingleQ(block+CO(k,k,ldb), m - k, n - k, ldb, hhVector);
 
+		diag[k] = block[CO(k,k,ldb)];//update diag
+
+		insSingleHHVector(block+CO(k,k,ldb), m - k, hhVector);//replace column with hhVector
+	}
 	//printMatrix(block, m, n, ldb);
 }
 
@@ -155,7 +163,8 @@ void qRDoubleBlock	(double* blockA,
 			double* blockB,
 			int bm,
 			int ldm,
-			double** hhVectors)
+			double** hhVectors,
+			double* rdiag)
 {
 	int k;
 	double* xVectB, *xVectA;
@@ -200,14 +209,14 @@ void applySingleBlock	(double* block,
 			int m,
 			int n,
 			int ldb,
-			double** hhVectors)
+			double* hhVectors)
 {
 	int h, k;
 	for(h = 0; h < m; h ++)
 	{
 		for(k = 0; k < n; k ++)
 		{
-			updateSingleQ(block + CO(k,h,ldb), m - k, 1, ldb, hhVectors[k]);
+			updateSingleQ(block + CO(k,h,ldb), m - k, 1, ldb, hhVectors);
 		}
 	}
 }
@@ -285,7 +294,7 @@ void updateDoubleQ	(double* matA,
 			z += matB[CO((k-ma),j,ldm)] * v[k];
 
 		//apply A(i,j) := A(i,j) + v[i] * y * z for top portion (lines 11 - 15 in Algorithm 1)
-		for(i = 0; i < rowsA; i ++)
+		for(i = 0; (i < rowsA); i ++)
 		{
 			a = -2 * z;
 			a *= v[i];
@@ -338,6 +347,16 @@ void updateSingleQ	(double* mat,
 		}
 	}
 	//printMatrix(mat, m, n, ldm);
+}
+
+void insSingleHHVector	(double* block,
+			int m,
+			double* vector)
+{
+	int i;
+	
+	for(i = 0; i < m; i ++)
+		block[i] = vector[i];
 }
 
 /**
@@ -406,9 +425,9 @@ void calcvkDouble	(double* xa,
 	double norm, div;
 
 	sign = xa[0] >= 0.0 ? 1 : -1;
-
-	for(i = 0; i < ma; i++)
-		vk[i] = xa[i];
+	vk[0] = xa[0];
+	for(i = 1; i < ma; i++)
+		vk[i] = 0;
 
 	for(; i < l; i++)
 		vk[i] = xb[i - ma];
@@ -477,7 +496,8 @@ void printMatrix(double* mat, int m, int n, int ldm)
 		{
 			printf(" %7.2f", mat[CO(r,c,ldm)]);
 		}
-		putchar('\n');
+		if(r != m-1)
+			putchar('\n');
 	}
 	printf("]\n");
 }
