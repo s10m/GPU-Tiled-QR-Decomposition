@@ -9,7 +9,7 @@
 #include "qrdecomp.h"
 
 #define CO(i,j,m) ((m * j) + i)
-#define COB(i,j,m) (sizeof(double)*(((m)*(j) + (i))))
+
 #define ZERO 0
 #define RAND 1
 #define EYE 2
@@ -24,53 +24,43 @@ int main	(int argc,
 
 void blockQR()
 {
-	double* matA = NULL, *singleVectors = NULL, **doubleVectors, *rdiag = NULL;
-	int ma = 3, na = 3, b = 3, i, j ,k, p = ma/b, q = na/b, minpq = p < q ? p : q;
+	double* matA = NULL, *singleVector = NULL, *doubleVector = NULL;
+	int ma = 4, na = 4, b = 2, i, j ,k, p = ma/b, q = na/b, minpq = p < q ? p : q;
 
-	rdiag = newMatrix(rdiag, na, 1);
 	matA = newMatrix(matA, ma, na);
 
 	srand(5);
 	initMatrix(matA, ma, na, RAND);
 
-	singleVectors = newMatrix(singleVectors, b, b);
+	singleVector = newMatrix(singleVector, b, 1);
 
-	allocVectors(&doubleVectors, 2*b, b);
+	doubleVector = newMatrix(doubleVector, 2*b, 1);
 
 	printf("A:\n");
 	printMatrix(matA, ma, na, ma);
 
 	for(k = 0; k < minpq ; k ++)
 	{
-		qRSingleBlock	(matA + CO((k*b),(k*b),ma), b, b,
-				ma, singleVectors, rdiag + (k*b));
+		qRSingleBlock(matA + CO((k*b),(k*b),ma), b, b, ma, singleVector);
 
 		for(j = k + 1; j < q; j ++)
 		{
-			applySingleBlock(matA + CO((k*b),(j*b),ma), b, b,
-					ma, singleVectors);
+			applySingleBlock(matA + CO((k*b),(j*b),ma), b, b, ma, matA + CO((k*b+1),(k*b),ma));
 		}
-		//printMatrix(matA, ma, na, ma);
-		
 		for(i = k + 1; i < p; i ++)
 		{
-			qRDoubleBlock	(matA + CO((k*b),(k*b),ma), b, b,
-					matA + CO((i*b),(k*b),ma), b,
-					ma, doubleVectors, rdiag);
-			
+			qRDoubleBlock(matA + CO((k*b),(k*b),ma), b, b, matA + CO((i*b),(k*b),ma), b, ma, doubleVector);
+			printMatrix(matA, ma, na, ma);
 			for(j = k + 1; j < q; j ++)
 			{
-				applyDoubleBlock(matA + CO((k*b),(j*b),ma), b,
-						matA + CO((i*b),(j*b),ma), b, b,
-						ma, doubleVectors);
+				applyDoubleBlock(matA + CO((k*b),(j*b),ma), b, matA + CO((i*b),(j*b),ma), b, b,	ma, matA + CO((k*b),(k*b),ma), matA + CO((i*b),(k*b),ma));
 			}
+			printMatrix(matA, ma, na, ma);
 		}
 	}
 
 	printf("tiled R:\n");
 	printMatrix(matA, ma, na, ma);
-	printf("diagonal of R:\n");
-	printMatrix(rdiag, na, 1, na);
 
 	deleteMatrix(matA);
 }
@@ -111,13 +101,12 @@ void qRSingleBlock	(double* block,
 			int m,
 			int n,
 			int ldb,
-			double* hhVector,
-			double* diag)
+			double* hhVector)
 {
 	int k;
 	double* xVect;
-
-	//printMatrix(block, m, n, ldb);
+	printf("factorising block:");
+	printMatrix(block, m, n, ldb);
 
 	for(k = 0; k < n; k++)
 	{
@@ -125,16 +114,16 @@ void qRSingleBlock	(double* block,
 		xVect = block + CO(k,k,ldb);//xVect is column vector from k -> b-k in column k of block
 		//vk = sign(x[1])||x||_2e1 + x
 		//vk = vk/||vk||_2
-		calcvkSingle(xVect, m - k, hhVector);
+		calcvkSingle(xVect, m - k, hhVector);//returns essential
 		/*printf("Householder vector %d: ", k);
-		printMatrix(hhVectors[k], m-k, 1, m-k);*/
+		printMatrix(hhVector, m-k-1, 1, m-k-1);*/
 
 		//matA(k:ma,k:na) = matA(k:ma,k:na) - 2((vk*vk.T)/(vk.T*vk))*matA(k:ma,k:na)
 		updateSingleQ(block+CO(k,k,ldb), m - k, n - k, ldb, hhVector);
 
-		diag[k] = block[CO(k,k,ldb)];//update diag
+		//diag[k] = block[CO(k,k,ldb)];//update diag
 
-		insSingleHHVector(block+CO(k,k,ldb), m - k, hhVector);//replace column with hhVector
+		insSingleHHVector(block+CO(k+1,k,ldb), m - k - 1, hhVector);//replace column with essential part of vector
 	}
 	//printMatrix(block, m, n, ldb);
 }
@@ -163,13 +152,12 @@ void qRDoubleBlock	(double* blockA,
 			double* blockB,
 			int bm,
 			int ldm,
-			double** hhVectors,
-			double* rdiag)
+			double* hhVector)
 {
 	int k;
 	double* xVectB, *xVectA;
-
-	/*printMatrix(blockA, am, an, ldm);
+	/*printf("blocks:\n");
+	printMatrix(blockA, am, an, ldm);
 	printMatrix(blockB, bm, an, ldm);*/
 
 	for(k = 0; k < an; k++)
@@ -180,19 +168,23 @@ void qRDoubleBlock	(double* blockA,
 
 		//vk = sign(x[1])||x||_2e1 + x
 		//vk = vk/||vk||_2
-		calcvkDouble(xVectA, am - k, xVectB, bm, (bm + am) - k, hhVectors[k]);
-		/*printf("Householder vector %d: ", k);
-		printMatrix(hhVectors[k], (am+bm)-k, 1, (am+bm)-k);*/
+		calcvkDouble(xVectA[0], am - k, xVectB, bm, (bm + am) - k, hhVector);//returns essential
+		//printf("Householder vector %d: ", k);
+		//printMatrix(hhVector, (am+bm)-k, 1, (am+bm)-k);
+		hhVector = hhVector + 1;
 
-		//matA(k:ma,k:na) = matA(k:ma,k:na) - 2((vk*vk.T)/(vk.T*vk))*matA(k:ma,k:na)
-		updateDoubleQ(xVectA, am - k, an - k, xVectB, bm, ldm, hhVectors[k], (am + bm) - k);//update top block
+		//matA(k:ma,k:na) = matA(k:ma,k:na) - 2(vk*(vk.T*matA(k:ma,k:na)
+		updateDoubleQZeros(xVectA, am - k, an - k, xVectB, bm, ldm, hhVector, (am + bm) - k);//update top block
+
+		//insSingleHHVector(xVectA, 1, hhVector);
+		insSingleHHVector(xVectB, bm, hhVector + am - k - 1);
 	}
 
 	/*printMatrix(blockA, am, an, ldm);
 	printMatrix(blockB, bm, an, ldm);*/
 }
 
-/** 
+/**
  * \brief Applies precomputed householder vectors to a single block within a matrix
  * 
  * Applies the computed householder vectors to a single block of a matrix :
@@ -212,11 +204,12 @@ void applySingleBlock	(double* block,
 			double* hhVectors)
 {
 	int h, k;
-	for(h = 0; h < m; h ++)
+
+	for(h = 0; h < n; h ++)
 	{
 		for(k = 0; k < n; k ++)
 		{
-			updateSingleQ(block + CO(k,h,ldb), m - k, 1, ldb, hhVectors);
+			updateSingleQ(block + CO(k,h,ldb), m - k, 1, ldb, hhVectors + CO(k,k,ldb));
 		}
 	}
 }
@@ -243,13 +236,24 @@ void applyDoubleBlock	(double* blockA,
 			int bm,
 			int n,
 			int ldm,
-			double** hhVectors)
+			double* hhVectorsA,
+			double* hhVectorsB)
 {
 	int h, k;
-	for(h = 0; h < am; h ++)
-	{
+
+	printf("applying:");
+	printMatrix(hhVectorsA, am, n, ldm);
+	printMatrix(hhVectorsB, bm, n, ldm);
+	printf("to:");
+	printMatrix(blockA, am, n, ldm);
+	printMatrix(blockB, bm, n, ldm);
+
+	for(h = 0; h < n; h ++)
+	{//for each column of the result, x
 		for(k = 0; k < n; k ++)
-			updateDoubleQ(blockA + CO(k,h,ldm), am - k, 1, blockB+CO(0,h,ldm), bm, ldm, hhVectors[k], (am + bm) - k);
+		{//multiply x by Q', overwriting with the result
+			updateDoubleQ(blockA + CO(k,h,ldm), am - k, 1, blockB+CO(0,h,ldm), bm, ldm, hhVectorsB + CO(0,k,ldm), (am + bm) - k);
+		}
 	}
 	
 }
@@ -276,35 +280,110 @@ void updateDoubleQ	(double* matA,
 			double* matB,
 			int mb,
 			int ldm,
-			double* v,
+			double* restv,
 			int l)
 {
-	int i, j, k, rows = ma + mb, cols = na, rowsA = ma;
-	double z, a;
+	int i, j, k, cols = na;
+	double z, a, y;
+	printf("updating");
+	printMatrix(matA, ma, na, ldm);
+	printMatrix(matB, mb, na, ldm);
+	printf("with");
+	printMatrix(restv, mb, 1, ldm);
+
+	y = 1;
+	for(k = 0; k < mb; k ++)
+	{
+		y += restv[k] * restv[k];
+	}
+
+	y = (-2)/y;
 
 	for(j = 0; j < cols; j ++)
 	{
 		//calculate z := sum(a(k,j) * v[k]) (lines 7 - 10 in Algorithm 1)
-		z = 0;
-		//do for top portion
-		for(k = 0; k < rowsA; k ++)
-			z += matA[CO(k,j,ldm)] * v[k];
-		//then for lower
-		for(; k < rows; k ++)
-			z += matB[CO((k-ma),j,ldm)] * v[k];
+		//do for top portion(only non-zero element in top portion is firstv)
+		z = matA[CO(0,j,ldm)];
+
+		//then for lower portion
+		for(k = 0; k < mb; k ++)
+			z += matB[CO(k,j,ldm)] * restv[k];
 
 		//apply A(i,j) := A(i,j) + v[i] * y * z for top portion (lines 11 - 15 in Algorithm 1)
-		for(i = 0; (i < rowsA); i ++)
+		a = y * z;
+		matA[CO(0,j,ldm)] += a;
+		printf("%d %d: %5.2f\n ", 0,j, a);
+
+		//then for the lower one
+		for(i = 0; i < mb; i ++)
 		{
-			a = -2 * z;
-			a *= v[i];
+			a = y * z;
+			a *= restv[i];
+			matB[CO(i,j,ldm)] += a;
+		}
+	}
+	printMatrix(matB, mb, 1, ldm);
+}
+
+void updateDoubleQZeros	(double* matA,
+			int ma,
+			int na,
+			double* matB,
+			int mb,
+			int ldm,
+			double* v,
+			int l)
+{
+	int i, j, k, rows = l, cols = na;
+	double z, a, y;
+
+	y = 1;
+	for(k = 1; k < rows; k ++)
+	{
+		y += v[k-1] * v[k-1];
+	}
+	if(y != 0)
+		y = (-2)/y;
+	else
+		y = 0;
+
+	for(j = 0; j < cols; j ++)
+	{
+		//calculate z := sum(a(k,j) * v[k]) (lines 7 - 10 in Algorithm 1)
+		z = matA[CO(0,j,ldm)];
+		//do for top non-zero, non-diagonal portion
+		for(k = 1; k < j+1; k ++)
+		{
+			z += matA[CO(k,j,ldm)] * v[k-1];
+		}
+		//count diagonal
+		//z += diag[j] * v[k];
+		//enter bottom portion (zeros for second half of top)
+		k = l - mb;
+
+		//then for lower
+		for(; k < rows; k ++)
+		{
+			z += matB[CO((k-(l-mb)),j,ldm)] * v[k-1];
+		}
+
+		//apply A(i,j) := A(i,j) + v[i] * y * z for top portion (lines 11 - 15 in Algorithm 1)
+		a = y * z;
+		matA[CO(0,j,ldm)] += a;
+		for(i = 1; i < j+1; i ++)
+		{
+			a = y * z;
+			a *= v[i-1];
 			matA[CO(i,j,ldm)] += a;
 		}
+		//matA[CO(i,j,ldm)] = diag[j] + y * z * v[i];
+		
+		i = l - mb;
 		//then for the lower one
 		for(; i < rows; i ++)
 		{
-			a = -2 * z;
-			a *= v[i];
+			a = y * z;
+			a *= v[i-1];
 			matB[CO((i-ma),j,ldm)] += a;
 		}
 	}
@@ -313,7 +392,7 @@ void updateDoubleQ	(double* matA,
 /**
  * \brief Applies the householder update a single block
  * 
- * Computes the update: \f[a_{ij} = a_{ij} + \left(v_i\frac{-2}{\sum_{k=1}^mv_k^2}\right)\left(\sum_{k=1}^ma_{kj}v_k\right)\f]
+ * Computes the update: \f[a_{ij} = a_{ij} + \left(v_i\frac{-2}{\sum_{k=1}^mv_k^2}\right)\left(\sum_{k=1}^ma_{kj}v_k\right)\f] with the non-essential part
  * 
  * \param mat Matrix of size \f$m \times n\f$
  * \param m The number of rows in the matrix
@@ -329,20 +408,30 @@ void updateSingleQ	(double* mat,
 			double* v)
 {
 	int i, j, k;
-	double z, a;
+	double z, a, y;
+
+	y = 1;
+	for(k = 1; k < m; k ++)
+	{
+		y += v[k-1] * v[k-1];
+	}
+	y = (-2) / y;
 
 	for(j = 0; j < n; j ++)
 	{
 		//calculate z := sum(a(k,j) * v[k]) (lines 7 - 10 in Algorithm 1)
-		z = 0;
-		for(k = 0; k < m; k ++)
-			z += mat[CO(k,j,ldm)] * v[k];
+		z = mat[CO(0,j,ldm)];
+		for(k = 1; k < m; k ++)
+			z += mat[CO(k,j,ldm)] * v[k-1];
 
 		//apply A(i,j) := A(i,j) + v[i] * y * z (lines 11 - 15 in Algorithm 1)
-		for(i = 0; i < m; i ++)
+		a = y * z;
+		mat[CO(0,j,ldm)] += a;
+		
+		for(i = 1; i < m; i ++)
 		{
-			a = -2 * z;
-			a *= v[i];
+			a = y * z;
+			a *= v[i-1];
 			mat[CO(i,j,ldm)] += a;
 		}
 	}
@@ -375,23 +464,23 @@ void calcvkSingle	(double* x,
 			double* vk)
 {
 	int sign, i;
-	double norm, div;
+	double norm, div, beta;
 
 	sign = x[0] >= 0.0 ? 1 : -1;
+	beta = x[0];
+	for(i = 1; i < l; i++)
+		vk[i-1] = x[i];
 
-	for(i = 0; i < l; i++)
-		vk[i] = x[i];
-
-	norm = do2norm(vk, l);
+	norm = do2norm(x, l);
 	//printf("%5.2f ", norm);
-	vk[0] += norm * sign;
+	beta += norm * sign;
 
-	norm = do2norm(vk, l);
+	//norm = do2norm(vk, l);
 	//printf("%5.2f\n", vk[0]);
 
 	if(norm != 0.0)
 	{
-		div = 1/norm;
+		div = 1/beta;
 	
 		for(i = 0; i < l; i++)
 			vk[i] *= div;
@@ -414,7 +503,7 @@ void calcvkSingle	(double* x,
  *
  * \returns void
  */
-void calcvkDouble	(double* xa,
+void calcvkDouble	(double topDiag,
 			int ma,
 			double* xb,
 			int mb,
@@ -424,8 +513,9 @@ void calcvkDouble	(double* xa,
 	int sign, i;
 	double norm, div;
 
-	sign = xa[0] >= 0.0 ? 1 : -1;
-	vk[0] = xa[0];
+	sign = topDiag >= 0.0 ? 1 : -1;
+	vk[0] = topDiag;
+
 	for(i = 1; i < ma; i++)
 		vk[i] = 0;
 
@@ -435,16 +525,17 @@ void calcvkDouble	(double* xa,
 	norm = do2norm(vk, l);
 	//printf("%5.2f ", norm);
 	vk[0] += norm * sign;
-	norm = do2norm(vk,l);
+	//norm = do2norm(vk,l);
 	//printf("%5.2f\n", vk[0]);
 
 	if(norm != 0.0)
 	{
-		div = 1/norm;
+		div = 1/vk[0];
 	
-		for(i = 0; i < l; i++)
+		for(i = 1; i < l; i++)
 			vk[i] *= div;
 	}
+	//vk[0] = 1;
 }
 
 /*
