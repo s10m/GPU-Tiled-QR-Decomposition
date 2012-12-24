@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
+#include <time.h>
 
 #include "qrdecomp.h"
 
@@ -25,7 +26,10 @@ int main	(int argc,
 void blockQR()
 {
 	double* matA = NULL, *singleVector = NULL, *doubleVector = NULL;
-	int ma = 4, na = 4, b = 2, i, j ,k, p = ma/b, q = na/b, minpq = p < q ? p : q;
+	int ma = 1024, na = 1024, b = 32, i, j ,k, p = ma/b, q = na/b, minpq = p < q ? p : q;
+	clock_t before, after;
+	clock_t qrS = 0, appS = 0, qrD = 0, appD = 0, dint = 0, sint = 0;
+
 
 	matA = newMatrix(matA, ma, na);
 
@@ -37,69 +41,63 @@ void blockQR()
 	doubleVector = newMatrix(doubleVector, 2*b, 1);
 
 	printf("A:\n");
-	printMatrix(matA, ma, na, ma);
+	//printMatrix(matA, ma, na, ma);
 
 	for(k = 0; k < minpq ; k ++)
 	{
 		//compute QR of Akk: Akk <-- Vkk,Rkk
+		before = clock();
 		qRSingleBlock(matA + CO((k*b),(k*b),ma), b, b, ma, singleVector);
+		after = clock();
+		qrS += after - before;
 
 		for(j = k + 1; j < q; j ++)
 		{
 			//along kth row
 			//apply Vkk: Akj <-- Qkk'*Akj
+			before = clock();
 			applySingleBlock(matA + CO((k*b),(j*b),ma),
 					b, b, ma,
 					matA + CO((k*b+1),(k*b),ma));//vectors start below diagonal
+			after = clock();
+			appS += after - before;
 
 		}
 		for(i = k + 1; i < p; i ++)
 		{
 			//down kth column
 			//compute QR of Akk coupled with Aik: Akk, Aik <-- R~kk,Vik
+			before = clock();
 			qRDoubleBlock	(matA + CO((k*b),(k*b),ma),
 					b, b,
 					matA + CO((i*b),(k*b),ma),
 					b, ma, doubleVector);
+			after = clock();
+			qrD += after - before;
 
 			for(j = k + 1; j < q; j ++)
 			{
 				//along ith and kth rows
 				//apply Vik to coupled blocks: Akj, Aij <-- Qik'*(Akj,Aij)
+				before = clock();
 				applyDoubleBlock(matA + CO((k*b),(j*b),ma),
 						b,
 						matA + CO((i*b),(j*b),ma),
 						b, b, ma,
 						matA + CO((i*b),(k*b),ma));
+				after = clock();
+
+				appD += after - before;
 			}
 		}
 	}
 
 	printf("tiled R:\n");
-	printMatrix(matA, ma, na, ma);
+	//printMatrix(matA, ma, na, ma);
+
+	printf("Time taken: %ld, %ld, %ld, %ld\n", qrS, appS, qrD, appD);
 
 	deleteMatrix(matA);
-}
-
-/**
- * \brief Allocates storage for n householder vectors in a triangular array
- * \param hhVectors A pointer to the location to allocate the storage
- * \param m The number of rows to allocate for
- * \param n The number of vectors to allocate
- * \returns void
- */
-void allocVectors	(double*** hhVectors,
-			int m,
-			int n)
-{
-	int i;
-	
-	*hhVectors = malloc(n * sizeof(double*));
-	
-	for(i = 0; i < n; i++)
-	{
-		(*hhVectors)[i] = malloc((m - i) * sizeof(double));
-	}
 }
 
 /**
