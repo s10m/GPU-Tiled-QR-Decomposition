@@ -25,77 +25,54 @@ int main	(int argc,
 
 void blockQR()
 {
-	double* matA = NULL, *singleVector = NULL, *doubleVector = NULL;
-	int ma = 1024, na = 1024, b = 32, i, j ,k, p = ma/b, q = na/b, minpq = p < q ? p : q;
-	clock_t before, after;
-	clock_t qrS = 0, appS = 0, qrD = 0, appD = 0, dint = 0, sint = 0;
+	double* matA = NULL;
+	int ma = 4, na = 4, b = 2, i, j ,k, p = ma/b, q = na/b, minpq = p < q ? p : q;
 
-
-	matA = newMatrix(matA, ma, na);
+	matA = newMatrix(ma, na);
 
 	srand(5);
 	initMatrix(matA, ma, na, RAND);
 
-	singleVector = newMatrix(singleVector, b -1, 1);//simple scratchpad
-
-	doubleVector = newMatrix(doubleVector, 2*b, 1);
-
 	printf("A:\n");
-	//printMatrix(matA, ma, na, ma);
+	printMatrix(matA, ma, na, ma);
 
 	for(k = 0; k < minpq ; k ++)
 	{
 		//compute QR of Akk: Akk <-- Vkk,Rkk
-		before = clock();
-		qRSingleBlock(matA + CO((k*b),(k*b),ma), b, b, ma, singleVector);
-		after = clock();
-		qrS += after - before;
+		qRSingleBlock(matA + CO((k*b),(k*b),ma), b, b, ma);
 
 		for(j = k + 1; j < q; j ++)
 		{
 			//along kth row
 			//apply Vkk: Akj <-- Qkk'*Akj
-			before = clock();
 			applySingleBlock(matA + CO((k*b),(j*b),ma),
 					b, b, ma,
 					matA + CO((k*b+1),(k*b),ma));//vectors start below diagonal
-			after = clock();
-			appS += after - before;
-
 		}
 		for(i = k + 1; i < p; i ++)
 		{
 			//down kth column
 			//compute QR of Akk coupled with Aik: Akk, Aik <-- R~kk,Vik
-			before = clock();
 			qRDoubleBlock	(matA + CO((k*b),(k*b),ma),
 					b, b,
 					matA + CO((i*b),(k*b),ma),
-					b, ma, doubleVector);
-			after = clock();
-			qrD += after - before;
+					b, ma);
 
 			for(j = k + 1; j < q; j ++)
 			{
 				//along ith and kth rows
 				//apply Vik to coupled blocks: Akj, Aij <-- Qik'*(Akj,Aij)
-				before = clock();
 				applyDoubleBlock(matA + CO((k*b),(j*b),ma),
 						b,
 						matA + CO((i*b),(j*b),ma),
 						b, b, ma,
 						matA + CO((i*b),(k*b),ma));
-				after = clock();
-
-				appD += after - before;
 			}
 		}
 	}
 
 	printf("tiled R:\n");
-	//printMatrix(matA, ma, na, ma);
-
-	printf("Time taken: %ld, %ld, %ld, %ld\n", qrS, appS, qrD, appD);
+	printMatrix(matA, ma, na, ma);
 
 	deleteMatrix(matA);
 }
@@ -114,11 +91,11 @@ void blockQR()
 void qRSingleBlock	(double* block,
 			int m,
 			int n,
-			int ldb,
-			double* hhVector)
+			int ldb)
 {
 	int k;
 	double* xVect;
+	double* hhVector = newMatrix(m-1, 1);
 
 	for(k = 0; k < n; k++)
 	{
@@ -160,11 +137,11 @@ void qRDoubleBlock	(double* blockA,
 			int an,
 			double* blockB,
 			int bm,
-			int ldm,
-			double* hhVector)
+			int ldm)
 {
 	int k;
 	double* xVectB, *xVectA;
+	double* hhVector = newMatrix(am + bm, 1);
 
 	for(k = 0; k < an; k++)
 	{
@@ -572,7 +549,7 @@ double* multAB(double* matA, int ma, int na, int lda, double* matB, int nb, int 
 {
 	double* matC = NULL;
 	int i, j, k;
-	matC = newMatrix(matC, ma, nb);
+	matC = newMatrix(ma, nb);
 	initMatrix(matC, ma, nb, 0);
 
 	for(j = 0; j < nb; j++)
@@ -628,8 +605,9 @@ void deleteMatrix(double* matptr)
 	free(matptr);
 }
 
-double* newMatrix(double* matptr, int m, int n)
+double* newMatrix(int m, int n)
 {
+	double* matptr;
 	matptr = malloc(m * n * sizeof(double));
 	return matptr;
 }
