@@ -7,9 +7,11 @@
 #include <math.h>
 #include <time.h>
 
+#include "include/gridscheduler.h"
 #include "qrdecomp.h"
 
 #define CO(i,j,m) ((m * j) + i)
+#define COB(i,j,bs,N) ((i*N*bs) +(j*bs))
 
 #define ZERO 0
 #define RAND 1
@@ -26,7 +28,8 @@ int main	(int argc,
 void blockQR()
 {
 	double* matA = NULL;
-	int ma = 4, na = 4, b = 2, i, j ,k, p = ma/b, q = na/b, minpq = p < q ? p : q;
+	int ma = 4, na = 4, b = 2, /*i, j ,k,*/ p = ma/b, q = na/b/*, minpq = p < q ? p : q*/;
+	Task curtask, *taskGrid;
 
 	matA = newMatrix(ma, na);
 
@@ -35,8 +38,21 @@ void blockQR()
 
 	printf("A:\n");
 	printMatrix(matA, ma, na, ma);
+	
+	taskGrid = initScheduler(p, q);
+	
+	curtask = getNextTask(taskGrid, p, q);
 
-	for(k = 0; k < minpq ; k ++)
+	while(curtask.taskStatus != NONE)
+	{
+		doATask(curtask, matA, b, ma);
+		
+		doneATask(taskGrid, p, q, curtask);
+
+		curtask = getNextTask(taskGrid, p, q);
+	}
+	
+	/*for(k = 0; k < minpq ; k ++)
 	{
 		//compute QR of Akk: Akk <-- Vkk,Rkk
 		qRSingleBlock(matA + CO((k*b),(k*b),ma), b, b, ma);
@@ -47,7 +63,7 @@ void blockQR()
 			//apply Vkk: Akj <-- Qkk'*Akj
 			applySingleBlock(matA + CO((k*b),(j*b),ma),
 					b, b, ma,
-					matA + CO((k*b+1),(k*b),ma));//vectors start below diagonal
+					matA + CO((k*b),(k*b),ma));//vectors start below diagonal
 		}
 		for(i = k + 1; i < p; i ++)
 		{
@@ -69,12 +85,53 @@ void blockQR()
 						matA + CO((i*b),(k*b),ma));
 			}
 		}
-	}
+	}*/
 
 	printf("tiled R:\n");
 	printMatrix(matA, ma, na, ma);
 
 	deleteMatrix(matA);
+}
+
+void doATask(Task t, double* mat, int b, int ldm)
+{
+	double *blockV, *blockA, *blockB;
+
+	switch(t.taskType)
+	{
+		case QRS:
+		{
+			blockV = mat + CO((t.k*b),(t.k*b),ldm);
+			qRSingleBlock(blockV, b, b, ldm);
+			printf("qr %d,%d\n", t.k, t.k);
+			break;
+		}
+		case SAPP:
+		{
+			blockV = mat + CO((t.k*b),(t.k*b),ldm);
+			blockA = mat + CO((t.k*b),(t.m*b),ldm);
+			applySingleBlock(blockA, b, b, ldm, blockV);
+			printf("sapp %d,%d %d,%d\n", t.k, t.k, t.k, t.m);
+			break;
+		}
+		case QRD:
+		{
+			blockA = mat + CO((t.k*b),(t.k*b),ldm);
+			blockB = mat + CO((t.l*b),(t.k*b),ldm);
+			qRDoubleBlock(blockA, b, b, blockB, b, ldm);
+			printf("qrd %d,%d %d,%d\n", t.k, t.k, t.l, t.k);
+			break;
+		}
+		case DAPP:
+		{
+			blockV = mat + CO((t.l*b),(t.k*b),ldm);
+			blockA = mat + CO((t.k*b),(t.m*b),ldm);
+			blockB = mat + CO((t.l*b),(t.m*b),ldm);
+			applyDoubleBlock(blockA, b, blockB, b, b, ldm, blockV);
+			printf("dapp %d,%d %d,%d %d,%d\n", t.l, t.k, t.k, t.m, t.l, t.m);
+			break;
+		}
+	}
 }
 
 /**
@@ -97,6 +154,8 @@ void qRSingleBlock	(double* block,
 	double* xVect;
 	double* hhVector = newMatrix(m-1, 1);
 
+	/*printf("input to QRS:\n");
+	printMatrix(block, m, n, ldb);*/
 	for(k = 0; k < n; k++)
 	{
 		//x = matA(k:m,k)
@@ -128,7 +187,6 @@ void qRSingleBlock	(double* block,
  * \param blockB A pointer to the first element of the "bottom" block
  * \param bm The number of rows in blockB
  * \param ldm The leading dimension of the main matrix
- * \param hhVector A pointer to a pre-allocated array for use as a scratchpad
  *
  * \returns void
  */
@@ -142,6 +200,9 @@ void qRDoubleBlock	(double* blockA,
 	int k;
 	double* xVectB, *xVectA;
 	double* hhVector = newMatrix(am + bm, 1);
+	/*printf("input to QRD:\n");
+	printMatrix(blockA, am, an, ldm);
+	printMatrix(blockB, bm, an, ldm);*/
 
 	for(k = 0; k < an; k++)
 	{
@@ -184,6 +245,9 @@ void applySingleBlock	(double* block,
 			double* hhVectors)
 {
 	int h, k;
+	/*printf("input to SAPP:\n");
+	printMatrix(hhVectors, m, n, ldb);
+	printMatrix(block, m, n, ldb);*/
 
 	for(h = 0; h < n; h ++)
 	{
@@ -191,11 +255,12 @@ void applySingleBlock	(double* block,
 		for(k = 0; k < n; k ++)
 		{
 			//apply each successive kth vector to each hth column of the block to form the result
-			updateSingleQ	(block + CO(k,h,ldb),
+			updateSingleQInp(block + CO(k,h,ldb),
 					m - k, 1, ldb,
 					hhVectors + CO(k,k,ldb));
 		}
 	}
+	//printMatrix(block, m, n, ldb);
 }
 
 /**
@@ -224,6 +289,10 @@ void applyDoubleBlock	(double* blockA,
 			double* hhVectorsB)
 {
 	int h, k;
+	/*printf("input to DAPP:\n");
+	printMatrix(hhVectorsB, am, n, ldm);
+	printMatrix(blockA, am, n, ldm);
+	printMatrix(blockB, am, n, ldm);*/
 
 	for(h = 0; h < n; h ++)
 	{//for each column of the result, x
@@ -374,7 +443,54 @@ void updateDoubleQZeros	(double* matA,
 		}
 	}
 }
+/**
+ * \brief Applies the householder update a single block
+ * 
+ * Computes the update: \f[a_{ij} = a_{ij} + \left(v_i\frac{-2}{\sum_{k=1}^mv_k^2}\right)\left(\sum_{k=1}^ma_{kj}v_k\right)\f] with the non-essential part. see algorithm 1 for details
+ * 
+ * \param mat Matrix of size \f$m \times n\f$
+ * \param m The number of rows in the matrix
+ * \param n The number of columns in the matrix
+ * \param ldm The leading dimension of mat in memory
+ * \param v Pointer to an array containing the Householder reflector \f$v\f$
+ *
+ * \returns void
+ */
+void updateSingleQInp	(double* mat,
+			int m,
+			int n,
+			int ldm,
+			double* v)
+{
+	int i, j, k;
+	double z, a, y;
 
+	y = 1;
+	for(k = 1; k < m; k ++)
+	{
+		y += v[k] * v[k];
+	}
+	y = (-2) / y;
+
+	for(j = 0; j < n; j ++)
+	{
+		//calculate z := sum(a(k,j) * v[k]) (lines 7 - 10 in Algorithm 1)
+		z = mat[CO(0,j,ldm)];
+		for(k = 1; k < m; k ++)
+			z += mat[CO(k,j,ldm)] * v[k];
+
+		//apply A(i,j) := A(i,j) + v[i] * y * z (lines 11 - 15 in Algorithm 1)
+		a = y * z;
+		mat[CO(0,j,ldm)] += a;
+		
+		for(i = 1; i < m; i ++)
+		{
+			a = y * z;
+			a *= v[i];
+			mat[CO(i,j,ldm)] += a;
+		}
+	}
+}
 /**
  * \brief Applies the householder update a single block
  * 
