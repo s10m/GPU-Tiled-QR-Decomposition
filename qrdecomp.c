@@ -91,6 +91,7 @@ void blockQR()
 	printMatrix(matA, ma, na, ma);
 
 	deleteMatrix(matA);
+	free(taskGrid);
 }
 
 void doATask(Task t, double* mat, int b, int ldm)
@@ -166,11 +167,12 @@ void qRSingleBlock	(double* block,
 		calcvkSingle(xVect, m - k, hhVector);//returns essential
 
 		//matA(k:ma,k:na) = matA(k:ma,k:na) - 2((vk*vk.T)/(vk.T*vk))*matA(k:ma,k:na)
-		updateSingleQ(block+CO(k,k,ldb), m - k, n - k, ldb, hhVector);
+		updateSingleQ(xVect, m - k, n - k, ldb, hhVector);
 
 		//replace column with essential part of vector	
 		insSingleHHVector(block+CO(k+1,k,ldb), m - k - 1, hhVector);
 	}
+	deleteMatrix(hhVector);
 }
 
 /**
@@ -199,7 +201,7 @@ void qRDoubleBlock	(double* blockA,
 {
 	int k;
 	double* xVectB, *xVectA;
-	double* hhVector = newMatrix(am + bm, 1);
+	double* hhVector = newMatrix(am + bm, 1), *freeThisptr = hhVector;
 	/*printf("input to QRD:\n");
 	printMatrix(blockA, am, an, ldm);
 	printMatrix(blockB, bm, an, ldm);*/
@@ -222,6 +224,7 @@ void qRDoubleBlock	(double* blockA,
 		//place the kth vector in place overwriting the bottom block
 		insSingleHHVector(xVectB, bm, hhVector + am - k - 1);
 	}
+	deleteMatrix(freeThisptr);
 }
 
 /**
@@ -530,7 +533,6 @@ void updateSingleQ	(double* mat,
 		//apply A(i,j) := A(i,j) + v[i] * y * z (lines 11 - 15 in Algorithm 1)
 		a = y * z;
 		mat[CO(0,j,ldm)] += a;
-		
 		for(i = 1; i < m; i ++)
 		{
 			a = y * z;
