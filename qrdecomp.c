@@ -6,6 +6,9 @@
 #include <stdlib.h>
 #include <math.h>
 #include <time.h>
+#include <pthread.h>
+#include <signal.h>
+#include <errno.h>
 
 #include "include/gridscheduler.h"
 #include "qrdecomp.h"
@@ -16,6 +19,8 @@
 #define ZERO 0
 #define RAND 1
 #define EYE 2
+
+#define NUMTHREADS 7
 
 int main	(int argc,
 		char* argv[])
@@ -28,28 +33,72 @@ int main	(int argc,
 void blockQR()
 {
 	double* matA = NULL;
-	int ma = 4, na = 4, b = 2, /*i, j ,k,*/ p = ma/b, q = na/b/*, minpq = p < q ? p : q*/;
-	Task curtask, *taskGrid;
-
+	int ma = 2048, na = 2048, b = 64, /*i, j ,k,*/ p = ma/b, q = na/b, t = 0, i, isDone/*, minpq = p < q ? p : q*/;
+	pthread_t threads[NUMTHREADS];
+	pthread_attr_t tattr;
+	struct doTaskInfo taskInfs[NUMTHREADS];
+	
+	Task *taskGrid;
+	Task curtasks[NUMTHREADS];
+	
+	double* workingVects[NUMTHREADS];
+	
 	matA = newMatrix(ma, na);
 
 	srand(5);
 	initMatrix(matA, ma, na, RAND);
 
-	printf("A:\n");
-	printMatrix(matA, ma, na, ma);
+	//printMatrix(matA, ma, na, ma);
 	
 	taskGrid = initScheduler(p, q);
 	
-	curtask = getNextTask(taskGrid, p, q);
-
-	while(curtask.taskStatus != NONE)
+	for(i = 0; i < NUMTHREADS; i ++)//fill items for every task
 	{
-		doATask(curtask, matA, b, ma);
-		
-		doneATask(taskGrid, p, q, curtask);
+		curtasks[i].taskStatus = NONE;
+		threads[i] = 0;
+		taskInfs[i].ptr = matA;
+		taskInfs[i].b = b;
+		taskInfs[i].ldm = ma;
+		workingVects[i] = newMatrix(2*b,1);//single vector per thread, allocated here
+		taskInfs[i].taskVect = workingVects[i];
+	}
 
-		curtask = getNextTask(taskGrid, p, q);
+	printf("A:\n");
+
+	pthread_attr_init(&tattr);
+	pthread_attr_setdetachstate(&tattr, PTHREAD_CREATE_JOINABLE);
+
+	isDone = getNextTask(&curtasks[t], taskGrid, p, q);
+
+	while(isDone != 2)//some tasks are at least in the DOING state, not all done yet.
+	{
+		//t is a free task referencing task datas (curtasks, taskInfs, threads)
+		if(isDone == 0)//new task was returned
+		{
+			taskInfs[t].t = curtasks[t];
+			pthread_create(&threads[t], &tattr, pthr_doATask, (void*) &taskInfs[t]);
+		}
+
+		t = (t+1) % NUMTHREADS;
+
+		while((threads[t] != 0)&&(pthread_kill(threads[t],0) != ESRCH))//if thread valid and not finished
+		{
+			t = (t+1) % NUMTHREADS;//find one that is finished
+		}
+
+		if(threads[t] != 0)
+			pthread_detach(threads[t]);//free resources
+
+		//iterate through threads until t references empty process
+		//if associated task is done
+			//finish task
+
+		if(curtasks[t].taskStatus != NONE)//not one of the beginning tasks
+		{
+			doneATask(taskGrid, p, q, curtasks[t]);//register finished
+		}
+
+		isDone = getNextTask(&curtasks[t], taskGrid, p, q);
 	}
 	
 	/*for(k = 0; k < minpq ; k ++)
@@ -88,13 +137,21 @@ void blockQR()
 	}*/
 
 	printf("tiled R:\n");
-	printMatrix(matA, ma, na, ma);
+	//printMatrix(matA, ma, na, ma);
 
 	deleteMatrix(matA);
 	free(taskGrid);
+	pthread_attr_destroy(&tattr);
 }
 
-void doATask(Task t, double* mat, int b, int ldm)
+void* pthr_doATask(void* taskInfoptr)
+{
+	struct doTaskInfo localTaskInf = *((struct doTaskInfo*)taskInfoptr);
+	doATask(localTaskInf.t, localTaskInf.ptr, localTaskInf.b, localTaskInf.ldm, localTaskInf.taskVect);
+	pthread_exit(NULL);
+}
+
+void doATask(Task t, double* mat, int b, int ldm, double* colVect)
 {
 	double *blockV, *blockA, *blockB;
 
@@ -103,8 +160,8 @@ void doATask(Task t, double* mat, int b, int ldm)
 		case QRS:
 		{
 			blockV = mat + CO((t.k*b),(t.k*b),ldm);
-			qRSingleBlock(blockV, b, b, ldm);
-			printf("qr %d,%d\n", t.k, t.k);
+			qRSingleBlock(blockV, b, b, ldm, colVect);
+			//printf("qr %d,%d\n", t.k, t.k);
 			break;
 		}
 		case SAPP:
@@ -112,15 +169,15 @@ void doATask(Task t, double* mat, int b, int ldm)
 			blockV = mat + CO((t.k*b),(t.k*b),ldm);
 			blockA = mat + CO((t.k*b),(t.m*b),ldm);
 			applySingleBlock(blockA, b, b, ldm, blockV);
-			printf("sapp %d,%d %d,%d\n", t.k, t.k, t.k, t.m);
+			//printf("sapp %d,%d %d,%d\n", t.k, t.k, t.k, t.m);
 			break;
 		}
 		case QRD:
 		{
 			blockA = mat + CO((t.k*b),(t.k*b),ldm);
 			blockB = mat + CO((t.l*b),(t.k*b),ldm);
-			qRDoubleBlock(blockA, b, b, blockB, b, ldm);
-			printf("qrd %d,%d %d,%d\n", t.k, t.k, t.l, t.k);
+			qRDoubleBlock(blockA, b, b, blockB, b, ldm, colVect);
+			//printf("qrd %d,%d %d,%d\n", t.k, t.k, t.l, t.k);
 			break;
 		}
 		case DAPP:
@@ -129,7 +186,7 @@ void doATask(Task t, double* mat, int b, int ldm)
 			blockA = mat + CO((t.k*b),(t.m*b),ldm);
 			blockB = mat + CO((t.l*b),(t.m*b),ldm);
 			applyDoubleBlock(blockA, b, blockB, b, b, ldm, blockV);
-			printf("dapp %d,%d %d,%d %d,%d\n", t.l, t.k, t.k, t.m, t.l, t.m);
+			//printf("dapp %d,%d %d,%d %d,%d\n", t.l, t.k, t.k, t.m, t.l, t.m);
 			break;
 		}
 	}
@@ -149,11 +206,12 @@ void doATask(Task t, double* mat, int b, int ldm)
 void qRSingleBlock	(double* block,
 			int m,
 			int n,
-			int ldb)
+			int ldb,
+			double* hhVector)
 {
 	int k;
 	double* xVect;
-	double* hhVector = newMatrix(m-1, 1);
+//	double* hhVector = newMatrix(m-1, 1);
 
 	/*printf("input to QRS:\n");
 	printMatrix(block, m, n, ldb);*/
@@ -172,7 +230,7 @@ void qRSingleBlock	(double* block,
 		//replace column with essential part of vector	
 		insSingleHHVector(block+CO(k+1,k,ldb), m - k - 1, hhVector);
 	}
-	deleteMatrix(hhVector);
+	//deleteMatrix(hhVector);
 }
 
 /**
@@ -197,11 +255,12 @@ void qRDoubleBlock	(double* blockA,
 			int an,
 			double* blockB,
 			int bm,
-			int ldm)
+			int ldm,
+			double* hhVector)
 {
 	int k;
 	double* xVectB, *xVectA;
-	double* hhVector = newMatrix(am + bm, 1), *freeThisptr = hhVector;
+	//double* hhVector = newMatrix(am + bm, 1), *freeThisptr = hhVector;
 	/*printf("input to QRD:\n");
 	printMatrix(blockA, am, an, ldm);
 	printMatrix(blockB, bm, an, ldm);*/
@@ -224,7 +283,7 @@ void qRDoubleBlock	(double* blockA,
 		//place the kth vector in place overwriting the bottom block
 		insSingleHHVector(xVectB, bm, hhVector + am - k - 1);
 	}
-	deleteMatrix(freeThisptr);
+	//deleteMatrix(freeThisptr);
 }
 
 /**

@@ -4,7 +4,7 @@
 #define tgrid(x,y) taskGrid[(((y)*M)+(x))]
 
 enum Type {QRS, SAPP, QRD, DAPP};
-enum Status {READY, DOING, DONE, NONE};
+enum Status {READY, DOING, DONE, NONE, NOTASKS};
 
 typedef struct{
 	enum Type taskType;
@@ -13,7 +13,7 @@ typedef struct{
 } Task;
 
 void doneATask(Task*, int, int, Task);
-Task getNextTask(Task*, int, int);
+int getNextTask(Task*, Task*, int, int);
 Task* initScheduler(int, int);
 
 #endif

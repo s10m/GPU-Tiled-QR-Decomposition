@@ -182,13 +182,12 @@ void doneATask(Task* taskGrid, int M, int N, Task t)
 	q = t.m;
 	k = tgrid(p,q).k;
 	tType = getNextType(p, q, k);
+	tgrid(p,q).taskStatus = DONE;
 	
 	switch(tType)
 	{
 		case QRS:
 		{
-			tgrid(p,q).taskStatus = DONE;
-
 			for(j = k + 1; j < N; j ++)//check along row
 			{
 				if(candoSAPP(taskGrid, M, N, p, j, k))
@@ -201,16 +200,12 @@ void doneATask(Task* taskGrid, int M, int N, Task t)
 		}
 		case SAPP:
 		{
-			tgrid(p,q).taskStatus = DONE;
-
 			if(candoDAPP(taskGrid, M, N, p+1, q, k))//check one below
 				makeTask(taskGrid, M, p+1, q, DAPP, READY, k);
 			break;
 		}
 		case QRD:
 		{
-			tgrid(p,q).taskStatus = DONE;
-
 			for(j = k + 1; j < N; j ++)
 			{
 				if(candoDAPP(taskGrid, M, N, p, j, k))//check along row
@@ -223,7 +218,6 @@ void doneATask(Task* taskGrid, int M, int N, Task t)
 		}
 		case DAPP:
 		{
-			tgrid(p,q).taskStatus = DONE;
 			tTypeNext = getNextType(p, q, k + 1);
 
 			switch(tTypeNext)//check whether can activate any for next step
@@ -261,11 +255,11 @@ void doneATask(Task* taskGrid, int M, int N, Task t)
 	}
 }
 
-Task getNextTask(Task* taskGrid, int M, int N)
+//returns 0 if success, 1 if tasks in progress, 2 if complete
+int getNextTask(Task *t, Task* taskGrid, int M, int N)
 {
-	int i, j;
+	int i, j, r = 2;
 	Task ret;
-
 	ret.taskStatus = NONE;
 
 	/**
@@ -277,18 +271,32 @@ Task getNextTask(Task* taskGrid, int M, int N)
 	{
 		for(j = N-1; j > -1; j --)
 		{
-			if(tgrid(i,j).taskStatus == READY)
+			switch(tgrid(i,j).taskStatus)
 			{
-				tgrid(i,j).taskStatus = DOING;
-				ret = tgrid(i,j);
-				break;
+				case READY:
+				{
+					tgrid(i,j).taskStatus = DOING;
+					ret = tgrid(i,j);
+					r = 0;
+					break;
+				}			
+				case DOING:
+				{
+					r = 1;
+					break;
+				}
+				default:{}
+					
 			}
+			if(ret.taskStatus == DOING)
+				break;
 		}
 		if(ret.taskStatus == DOING)//if found
 			break;
 	}
 
-	return ret;
+	*t = ret;
+	return r;
 }
 
 Task* initScheduler(int M, int N)
