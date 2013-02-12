@@ -3,6 +3,10 @@
 
 #define tgrid(x,y) taskGrid[(((y)*M)+(x))]
 
+#define TASK_AVAIL 0
+#define TASK_NONE 1
+#define TASK_DONE 2
+
 enum Type {QRS, SAPP, QRD, DAPP};
 enum Status {READY, DOING, DONE, NONE, NOTASKS};
 

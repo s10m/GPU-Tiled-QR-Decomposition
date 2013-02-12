@@ -1,42 +1,51 @@
 #ifndef QRDECOMP_H
 #define QRDECOMP_H
-void* pthr_doATask(void*);
+void* pthr_doTasks(void*);
+void doPthrBcast(pthread_mutex_t*, pthread_cond_t*, int*);
 
-struct doTaskInfo
+struct ThreadInfo
 {
-	Task t;
-	double* ptr, *taskVect;
-	int b, ldm;
+	float* mat, *wspace;
+	int ldm, b;
+
+	Task* taskGrid;
+	int taskM, taskN;
+
+	pthread_mutex_t *getTaskMutex, *getSigMutex;
+	pthread_cond_t *newTasksCond;
+	int *condMet;
 };
 
 void blockQR(void);
 
-double* newMatrix(int, int);
-void deleteMatrix(double*);
-void initMatrix(double*, int, int, int);
-void printMatrix(double*, int, int, int);
+float* newMatrix(int, int);
+void deleteMatrix(float*);
+void initMatrix(float*, int, int, int);
+void printMatrix(float*, int, int, int);
+void copyMatrix(float*, int, int, float*);
+void checkEqual(float*, float*, int, int, int);
 
-void doATask(Task, double*, int, int, double*);
+void doATask(Task, float*, int, int, float*);
 
-double* multAB(double*, int, int, int, double*, int, int);
+float* multAB(float*, int, int, int, float*, int, int);
 
-void qRSingleBlock(double*, int, int, int, double*);
-void qRDoubleBlock(double*, int, int, double*, int, int, double*);
+void qRSingleBlock(float*, int, int, int, float*);
+void qRDoubleBlock(float*, int, int, float*, int, int, float*);
 
-void applySingleBlock(double*, int, int, int, double*);
-void applyDoubleBlock(double*, int, double*, int, int, int, double*);
+void applySingleBlock(float*, int, int, int, float*);
+void applyDoubleBlock(float*, int, float*, int, int, int, float*);
 
-void insSingleHHVector(double*, int, double*);
+void insSingleHHVector(float*, int, float*);
 
-void allocVectors(double***, int, int);
+void allocVectors(float***, int, int);
 
-void calcvkSingle(double*, int, double*);
-void calcvkDouble(double, int, double*, int, double*);
+void calcvkSingle(float*, int, float*);
+void calcvkDouble(float, int, float*, int, float*);
 
-void updateSingleQ(double*, int, int, int, double*);
-void updateSingleQInp(double*, int, int, int, double*);
-void updateDoubleQZeros(double*, int, int, double*, int, int, double*, int);
-void updateDoubleQ(double*, int, int, double*, int, int, double*);
+void updateSingleQ(float*, int, int, int, float*);
+void updateSingleQInp(float*, int, int, int, float*);
+void updateDoubleQZeros(float*, int, int, float*, int, int, float*, int);
+void updateDoubleQ(float*, int, int, float*, int, int, float*);
 
-double do2norm(double*, int);
+float do2norm(float*, int);
 #endif

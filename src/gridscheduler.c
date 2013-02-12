@@ -258,7 +258,7 @@ void doneATask(Task* taskGrid, int M, int N, Task t)
 //returns 0 if success, 1 if tasks in progress, 2 if complete
 int getNextTask(Task *t, Task* taskGrid, int M, int N)
 {
-	int i, j, r = 2;
+	int i, j, r = TASK_DONE;
 	Task ret;
 	ret.taskStatus = NONE;
 
@@ -277,12 +277,12 @@ int getNextTask(Task *t, Task* taskGrid, int M, int N)
 				{
 					tgrid(i,j).taskStatus = DOING;
 					ret = tgrid(i,j);
-					r = 0;
+					r = TASK_AVAIL;
 					break;
 				}			
 				case DOING:
 				{
-					r = 1;
+					r = TASK_NONE;
 					break;
 				}
 				default:{}

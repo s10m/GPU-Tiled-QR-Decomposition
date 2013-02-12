@@ -11,6 +11,7 @@
 #include <errno.h>
 
 #include "include/gridscheduler.h"
+#include "include/gpucalc.h"
 #include "qrdecomp.h"
 
 #define CO(i,j,m) ((m * j) + i)
@@ -20,7 +21,9 @@
 #define RAND 1
 #define EYE 2
 
-#define NUMTHREADS 7
+#define NUMTHREADS 4
+
+#define EPSILON 0.006
 
 int main	(int argc,
 		char* argv[])
@@ -32,128 +35,207 @@ int main	(int argc,
 
 void blockQR()
 {
-	double* matA = NULL;
-	int ma = 2048, na = 2048, b = 64, /*i, j ,k,*/ p = ma/b, q = na/b, t = 0, i, isDone/*, minpq = p < q ? p : q*/;
+	float* matA = NULL, *matComp = NULL;
+	int ma = 4096, na = 4096, b = 32, i, j ,k, p = ma/b, q = na/b, t = 0, rc, minpq = p < q ? p : q, ret;
+
 	pthread_t threads[NUMTHREADS];
 	pthread_attr_t tattr;
-	struct doTaskInfo taskInfs[NUMTHREADS];
+
+	pthread_cond_t tCond = PTHREAD_COND_INITIALIZER;
+	pthread_mutex_t tMutex = PTHREAD_MUTEX_INITIALIZER, sigMutex = PTHREAD_MUTEX_INITIALIZER;
+	int tCondMet = 0;
+
+	struct ThreadInfo threadInfs[NUMTHREADS];
 	
 	Task *taskGrid;
-	Task curtasks[NUMTHREADS];
-	
-	double* workingVects[NUMTHREADS];
+	float* workingVects[NUMTHREADS];
 	
 	matA = newMatrix(ma, na);
-
+	matComp = newMatrix(ma, na);
+	
 	srand(5);
 	initMatrix(matA, ma, na, RAND);
 
+	copyMatrix(matA, ma, na, matComp);
+
+	printf("A:\n");
 	//printMatrix(matA, ma, na, ma);
 	
 	taskGrid = initScheduler(p, q);
-	
+
 	for(i = 0; i < NUMTHREADS; i ++)//fill items for every task
 	{
-		curtasks[i].taskStatus = NONE;
-		threads[i] = 0;
-		taskInfs[i].ptr = matA;
-		taskInfs[i].b = b;
-		taskInfs[i].ldm = ma;
 		workingVects[i] = newMatrix(2*b,1);//single vector per thread, allocated here
-		taskInfs[i].taskVect = workingVects[i];
+		threadInfs[i].mat = matA;
+		threadInfs[i].wspace = workingVects[i];
+		threadInfs[i].ldm = ma;
+		threadInfs[i].b = b;
+		threadInfs[i].getTaskMutex = &tMutex;
+		threadInfs[i].getSigMutex = &sigMutex;
+		threadInfs[i].newTasksCond = &tCond;
+		threadInfs[i].condMet = &tCondMet;
+		threadInfs[i].taskGrid = taskGrid;
+		threadInfs[i].taskM = p;
+		threadInfs[i].taskN = q;
 	}
-
-	printf("A:\n");
 
 	pthread_attr_init(&tattr);
 	pthread_attr_setdetachstate(&tattr, PTHREAD_CREATE_JOINABLE);
 
-	isDone = getNextTask(&curtasks[t], taskGrid, p, q);
-
-	while(isDone != 2)//some tasks are at least in the DOING state, not all done yet.
+	while(t < NUMTHREADS)
 	{
-		//t is a free task referencing task datas (curtasks, taskInfs, threads)
-		if(isDone == 0)//new task was returned
-		{
-			taskInfs[t].t = curtasks[t];
-			pthread_create(&threads[t], &tattr, pthr_doATask, (void*) &taskInfs[t]);
-		}
-
-		t = (t+1) % NUMTHREADS;
-
-		while((threads[t] != 0)&&(pthread_kill(threads[t],0) != ESRCH))//if thread valid and not finished
-		{
-			t = (t+1) % NUMTHREADS;//find one that is finished
-		}
-
-		if(threads[t] != 0)
-			pthread_detach(threads[t]);//free resources
-
-		//iterate through threads until t references empty process
-		//if associated task is done
-			//finish task
-
-		if(curtasks[t].taskStatus != NONE)//not one of the beginning tasks
-		{
-			doneATask(taskGrid, p, q, curtasks[t]);//register finished
-		}
-
-		isDone = getNextTask(&curtasks[t], taskGrid, p, q);
+		rc = pthread_create(&threads[t], &tattr, pthr_doTasks, (void*) &threadInfs[t]);
+		printf("create %d returned %d\n", t, rc);
+		t ++;
 	}
-	
+
+	pthread_mutex_lock(&sigMutex);
+
+	//broadcast cond
+	tCondMet = 1;
+	pthread_cond_broadcast(&tCond);
+	pthread_mutex_unlock(&sigMutex);
+
+	t = 0;
+
+	while(t < NUMTHREADS)
+	{
+		rc = pthread_join(threads[t], NULL);
+		printf("join %d returned %d\n", t, rc);
+		t ++;
+	}
+
+	cudaQRFull(matComp, ma, na);
+	printf("tiled R:\n");
+	//printMatrix(matA, ma, na, ma);
+
 	/*for(k = 0; k < minpq ; k ++)
 	{
 		//compute QR of Akk: Akk <-- Vkk,Rkk
-		qRSingleBlock(matA + CO((k*b),(k*b),ma), b, b, ma);
+		qRSingleBlock(matComp + CO((k*b),(k*b),ma), b, b, ma, workingVects[0]);
 
 		for(j = k + 1; j < q; j ++)
 		{
 			//along kth row
 			//apply Vkk: Akj <-- Qkk'*Akj
-			applySingleBlock(matA + CO((k*b),(j*b),ma),
+			applySingleBlock(matComp + CO((k*b),(j*b),ma),
 					b, b, ma,
-					matA + CO((k*b),(k*b),ma));//vectors start below diagonal
+					matComp + CO((k*b),(k*b),ma));//vectors start below diagonal
 		}
 		for(i = k + 1; i < p; i ++)
 		{
 			//down kth column
 			//compute QR of Akk coupled with Aik: Akk, Aik <-- R~kk,Vik
-			qRDoubleBlock	(matA + CO((k*b),(k*b),ma),
+			qRDoubleBlock	(matComp + CO((k*b),(k*b),ma),
 					b, b,
-					matA + CO((i*b),(k*b),ma),
-					b, ma);
+					matComp + CO((i*b),(k*b),ma),
+					b, ma, workingVects[0]);
 
 			for(j = k + 1; j < q; j ++)
 			{
 				//along ith and kth rows
 				//apply Vik to coupled blocks: Akj, Aij <-- Qik'*(Akj,Aij)
-				applyDoubleBlock(matA + CO((k*b),(j*b),ma),
+				applyDoubleBlock(matComp + CO((k*b),(j*b),ma),
 						b,
-						matA + CO((i*b),(j*b),ma),
+						matComp + CO((i*b),(j*b),ma),
 						b, b, ma,
-						matA + CO((i*b),(k*b),ma));
+						matComp + CO((i*b),(k*b),ma));
 			}
 		}
 	}*/
 
-	printf("tiled R:\n");
-	//printMatrix(matA, ma, na, ma);
+	printf("Compare:\n");
+	//printMatrix(matComp, ma, na, ma);
+
+	checkEqual(matA, matComp, ma, na, ma);
+	printf("are equal\n");
 
 	deleteMatrix(matA);
 	free(taskGrid);
 	pthread_attr_destroy(&tattr);
 }
 
-void* pthr_doATask(void* taskInfoptr)
+void* pthr_doTasks(void* threadinfoptr)
 {
-	struct doTaskInfo localTaskInf = *((struct doTaskInfo*)taskInfoptr);
-	doATask(localTaskInf.t, localTaskInf.ptr, localTaskInf.b, localTaskInf.ldm, localTaskInf.taskVect);
+	int nextTask;
+	float *mat, *workingVect;
+	int ldm, b, taskM, taskN;
+	Task* taskGrid, toDoTask;
+
+	int *condMet;
+	pthread_mutex_t *tMutex, *sigMutex;
+	pthread_cond_t *tCond;
+
+	struct ThreadInfo localThreadInf;
+
+	localThreadInf = *((struct ThreadInfo*)threadinfoptr);
+	nextTask = 1;
+	
+	mat = localThreadInf.mat;
+	workingVect = localThreadInf.wspace;
+	ldm = localThreadInf.ldm;
+	b = localThreadInf.b;
+
+	taskGrid = localThreadInf.taskGrid;
+	taskM = localThreadInf.taskM;
+	taskN = localThreadInf.taskN;
+
+	tMutex = localThreadInf.getTaskMutex;
+	sigMutex = localThreadInf.getSigMutex;
+	tCond = localThreadInf.newTasksCond;
+	condMet = localThreadInf.condMet;	
+
+	while(nextTask != TASK_DONE)
+	{
+		//pthread_cond_wait
+		pthread_mutex_lock(sigMutex);
+		while(!*condMet)
+		{
+			pthread_cond_wait(tCond, sigMutex);
+		}
+
+		*condMet = 0;
+		pthread_mutex_unlock(sigMutex);
+
+		pthread_mutex_lock(tMutex);
+		//fetch next task
+		nextTask = getNextTask(&toDoTask, taskGrid, taskM, taskN);
+
+		//release mutex
+		pthread_mutex_unlock(tMutex);
+
+		doPthrBcast(sigMutex, tCond, condMet);
+
+		//execute task
+		if(nextTask == TASK_AVAIL)//not TASK_NONE or TASK_DONE
+		{
+			doATask(toDoTask, mat, b, ldm, workingVect);
+
+			pthread_mutex_lock(tMutex);
+			//finish task
+			doneATask(taskGrid, taskM, taskN, toDoTask);
+			pthread_mutex_unlock(tMutex);
+			
+			doPthrBcast(sigMutex, tCond, condMet);
+		}
+	}
+	doPthrBcast(sigMutex, tCond, condMet);
+
 	pthread_exit(NULL);
 }
 
-void doATask(Task t, double* mat, int b, int ldm, double* colVect)
+void doPthrBcast(pthread_mutex_t* mutex, pthread_cond_t* cond, int* condmet)
 {
-	double *blockV, *blockA, *blockB;
+	pthread_mutex_lock(mutex);
+	//broadcast cond
+	*condmet = 1;
+	pthread_cond_broadcast(cond);
+	pthread_mutex_unlock(mutex);
+}
+
+void doATask(Task t, float* mat, int b, int ldm, float* colVect)
+{
+	float *blockV, *blockA, *blockB;
 
 	switch(t.taskType)
 	{
@@ -161,6 +243,7 @@ void doATask(Task t, double* mat, int b, int ldm, double* colVect)
 		{
 			blockV = mat + CO((t.k*b),(t.k*b),ldm);
 			qRSingleBlock(blockV, b, b, ldm, colVect);
+			//cudaQRS(blockV, ldm);
 			//printf("qr %d,%d\n", t.k, t.k);
 			break;
 		}
@@ -169,6 +252,7 @@ void doATask(Task t, double* mat, int b, int ldm, double* colVect)
 			blockV = mat + CO((t.k*b),(t.k*b),ldm);
 			blockA = mat + CO((t.k*b),(t.m*b),ldm);
 			applySingleBlock(blockA, b, b, ldm, blockV);
+			//cudaSAPP(blockV, blockA, ldm);
 			//printf("sapp %d,%d %d,%d\n", t.k, t.k, t.k, t.m);
 			break;
 		}
@@ -177,6 +261,7 @@ void doATask(Task t, double* mat, int b, int ldm, double* colVect)
 			blockA = mat + CO((t.k*b),(t.k*b),ldm);
 			blockB = mat + CO((t.l*b),(t.k*b),ldm);
 			qRDoubleBlock(blockA, b, b, blockB, b, ldm, colVect);
+			//cudaQRD(blockA, blockB, ldm);
 			//printf("qrd %d,%d %d,%d\n", t.k, t.k, t.l, t.k);
 			break;
 		}
@@ -186,6 +271,7 @@ void doATask(Task t, double* mat, int b, int ldm, double* colVect)
 			blockA = mat + CO((t.k*b),(t.m*b),ldm);
 			blockB = mat + CO((t.l*b),(t.m*b),ldm);
 			applyDoubleBlock(blockA, b, blockB, b, b, ldm, blockV);
+			//cudaDAPP(blockV, blockA, blockB, ldm);
 			//printf("dapp %d,%d %d,%d %d,%d\n", t.l, t.k, t.k, t.m, t.l, t.m);
 			break;
 		}
@@ -203,15 +289,15 @@ void doATask(Task t, double* mat, int b, int ldm, double* colVect)
  *
  * \returns void
  */
-void qRSingleBlock	(double* block,
+void qRSingleBlock	(float* block,
 			int m,
 			int n,
 			int ldb,
-			double* hhVector)
+			float* hhVector)
 {
 	int k;
-	double* xVect;
-//	double* hhVector = newMatrix(m-1, 1);
+	float* xVect;
+//	float* hhVector = newMatrix(m-1, 1);
 
 	/*printf("input to QRS:\n");
 	printMatrix(block, m, n, ldb);*/
@@ -250,17 +336,17 @@ void qRSingleBlock	(double* block,
  *
  * \returns void
  */
-void qRDoubleBlock	(double* blockA,
+void qRDoubleBlock	(float* blockA,
 			int am,
 			int an,
-			double* blockB,
+			float* blockB,
 			int bm,
 			int ldm,
-			double* hhVector)
+			float* hhVector)
 {
 	int k;
-	double* xVectB, *xVectA;
-	//double* hhVector = newMatrix(am + bm, 1), *freeThisptr = hhVector;
+	float* xVectB, *xVectA;
+	//float* hhVector = newMatrix(am + bm, 1), *freeThisptr = hhVector;
 	/*printf("input to QRD:\n");
 	printMatrix(blockA, am, an, ldm);
 	printMatrix(blockB, bm, an, ldm);*/
@@ -300,11 +386,11 @@ void qRDoubleBlock	(double* blockA,
  * 
  * \returns void
  */
-void applySingleBlock	(double* block,
+void applySingleBlock	(float* block,
 			int m,
 			int n,
 			int ldb,
-			double* hhVectors)
+			float* hhVectors)
 {
 	int h, k;
 	/*printf("input to SAPP:\n");
@@ -342,13 +428,13 @@ void applySingleBlock	(double* block,
  *
  * \returns void
  */
-void applyDoubleBlock	(double* blockA,
+void applyDoubleBlock	(float* blockA,
 			int am,
-			double* blockB,
+			float* blockB,
 			int bm,
 			int n,
 			int ldm,
-			double* hhVectorsB)
+			float* hhVectorsB)
 {
 	int h, k;
 	/*printf("input to DAPP:\n");
@@ -382,16 +468,16 @@ void applyDoubleBlock	(double* blockA,
  * \returns void
  */
 
-void updateDoubleQ	(double* matA,
+void updateDoubleQ	(float* matA,
 			int ma,
 			int na,
-			double* matB,
+			float* matB,
 			int mb,
 			int ldm,
-			double* v)
+			float* v)
 {
 	int i, j, k, cols = na;
-	double z, a, y;
+	float z, a, y;
 
 	//compute y as per Algorithm 1, assuming the first element of v is 1 from the earlier normalisation
 	y = 1;
@@ -445,17 +531,17 @@ void updateDoubleQ	(double* matA,
  */
 
 
-void updateDoubleQZeros	(double* matA,
+void updateDoubleQZeros	(float* matA,
 			int ma,
 			int na,
-			double* matB,
+			float* matB,
 			int mb,
 			int ldm,
-			double* v,
+			float* v,
 			int l)
 {
 	int i, j, k, rows = l, cols = na;
-	double z, a, y;
+	float z, a, y;
 
 	y = 1;
 	for(k = 1; k < rows; k ++)
@@ -518,14 +604,14 @@ void updateDoubleQZeros	(double* matA,
  *
  * \returns void
  */
-void updateSingleQInp	(double* mat,
+void updateSingleQInp	(float* mat,
 			int m,
 			int n,
 			int ldm,
-			double* v)
+			float* v)
 {
 	int i, j, k;
-	double z, a, y;
+	float z, a, y;
 
 	y = 1;
 	for(k = 1; k < m; k ++)
@@ -566,14 +652,14 @@ void updateSingleQInp	(double* mat,
  *
  * \returns void
  */
-void updateSingleQ	(double* mat,
+void updateSingleQ	(float* mat,
 			int m,
 			int n,
 			int ldm,
-			double* v)
+			float* v)
 {
 	int i, j, k;
-	double z, a, y;
+	float z, a, y;
 
 	y = 1;
 	for(k = 1; k < m; k ++)
@@ -608,9 +694,9 @@ void updateSingleQ	(double* mat,
  * \param vector The vector to be copied
  * \returns void
  */
-void insSingleHHVector	(double* block,
+void insSingleHHVector	(float* block,
 			int m,
-			double* vector)
+			float* vector)
 {
 	int i;
 	
@@ -631,12 +717,12 @@ void insSingleHHVector	(double* block,
  *
  * \returns void
  */
-void calcvkSingle	(double* x,
+void calcvkSingle	(float* x,
 			int l,
-			double* vk)
+			float* vk)
 {
 	int sign, i;
-	double norm, div, beta;
+	float norm, div, beta;
 
 	sign = x[0] >= 0.0 ? 1 : -1;
 	beta = x[0];
@@ -673,14 +759,14 @@ void calcvkSingle	(double* x,
  *
  * \returns void
  */
-void calcvkDouble	(double topDiag,
+void calcvkDouble	(float topDiag,
 			int ma,
-			double* xb,
+			float* xb,
 			int l,
-			double* vk)
+			float* vk)
 {
 	int sign, i;
-	double norm, div;
+	float norm, div;
 	//same non-standard normalisation as for single blocks above, but organised without a temporary beta veriable
 
 	sign = topDiag >= 0.0 ? 1 : -1;
@@ -709,9 +795,9 @@ void calcvkDouble	(double topDiag,
   
   Computes the 2-norm by computing the following: \f[\textrm{2-norm}=\sqrt_0^lx(i)^2\f]
  */
-double do2norm(double* x, int l)
+float do2norm(float* x, int l)
 {
-	double sum = 0, norm;
+	float sum = 0, norm;
 	int i;
 
 	for(i = 0; i < l; i++)
@@ -722,9 +808,9 @@ double do2norm(double* x, int l)
 	return norm;
 }
 
-double* multAB(double* matA, int ma, int na, int lda, double* matB, int nb, int ldb)
+float* multAB(float* matA, int ma, int na, int lda, float* matB, int nb, int ldb)
 {
-	double* matC = NULL;
+	float* matC = NULL;
 	int i, j, k;
 	matC = newMatrix(ma, nb);
 	initMatrix(matC, ma, nb, 0);
@@ -743,7 +829,38 @@ double* multAB(double* matA, int ma, int na, int lda, double* matB, int nb, int 
 	return matC;
 }
 
-void printMatrix(double* mat, int m, int n, int ldm)
+void copyMatrix(float* mat, int m, int n, float* copymat)
+{
+	int i;
+
+	for(i = 0; i < m*n; i ++)
+		copymat[i] = mat[i];
+}
+
+void checkEqual(float* matA, float* matB, int m, int n, int ldm)
+{
+	int i, j;
+	float diff, epsilon = EPSILON;
+	for(i = 0; i < m; i ++)
+	{
+		for(j = 0; j < n; j ++)
+		{
+			diff = matA[CO(i,j,ldm)] - matB[CO(i,j,ldm)];
+			if(diff > 0)
+			{
+				if(diff > epsilon)
+					printf("(%d,%d) %5.3f != %5.3f\n", i, j, matA[CO(i,j,ldm)], matB[CO(i,j,ldm)]);
+			}
+			else
+			{
+				if(diff < -1*epsilon)
+					printf("(%d,%d) %5.3f != %5.3f\n", i, j, matA[CO(i,j,ldm)], matB[CO(i,j,ldm)]);
+			}
+		}
+	}
+}
+
+void printMatrix(float* mat, int m, int n, int ldm)
 {
 	int r, c;
 	putchar('[');
@@ -759,7 +876,7 @@ void printMatrix(double* mat, int m, int n, int ldm)
 	printf("]\n");
 }
 
-void initMatrix(double* mat, int m, int n, int mode)
+void initMatrix(float* mat, int m, int n, int mode)
 {
 	int r, c;
 
@@ -770,21 +887,21 @@ void initMatrix(double* mat, int m, int n, int mode)
 			if(mode == ZERO)
 				mat[CO(r,c,m)] = 0;
 			else if(mode == RAND)
-				mat[CO(r,c,m)] = rand() % (m * n);
+				mat[CO(r,c,m)] = rand() % 32;
 			else if(mode == EYE)
 				mat[CO(r,c,m)] = r == c ? 1 : 0;
 		}
 	}
 }
 
-void deleteMatrix(double* matptr)
+void deleteMatrix(float* matptr)
 {
 	free(matptr);
 }
 
-double* newMatrix(int m, int n)
+float* newMatrix(int m, int n)
 {
-	double* matptr;
-	matptr = malloc(m * n * sizeof(double));
+	float* matptr;
+	matptr = malloc(m * n * sizeof(float));
 	return matptr;
 }
