@@ -12,6 +12,7 @@
 
 #include "include/gridscheduler.h"
 #include "include/gpucalc.h"
+#include "include/cycle.h"
 #include "qrdecomp.h"
 
 #define CO(i,j,m) ((m * j) + i)
@@ -21,7 +22,7 @@
 #define RAND 1
 #define EYE 2
 
-#define NUMTHREADS 4
+#define NUMTHREADS 1
 
 #define EPSILON 0.006
 
@@ -36,7 +37,9 @@ int main	(int argc,
 void blockQR()
 {
 	float* matA = NULL, *matComp = NULL;
-	int ma = 4096, na = 4096, b = 32, i, j ,k, p = ma/b, q = na/b, t = 0, rc, minpq = p < q ? p : q, ret;
+	int ma = 512, na = 512, b = 32, i, j ,k, p = ma/b, q = na/b, t = 0, rc, minpq = p < q ? p : q, ret;
+
+	ticks tick, tock;
 
 	pthread_t threads[NUMTHREADS];
 	pthread_attr_t tattr;
@@ -71,7 +74,6 @@ void blockQR()
 		threadInfs[i].ldm = ma;
 		threadInfs[i].b = b;
 		threadInfs[i].getTaskMutex = &tMutex;
-		threadInfs[i].getSigMutex = &sigMutex;
 		threadInfs[i].newTasksCond = &tCond;
 		threadInfs[i].condMet = &tCondMet;
 		threadInfs[i].taskGrid = taskGrid;
@@ -82,6 +84,7 @@ void blockQR()
 	pthread_attr_init(&tattr);
 	pthread_attr_setdetachstate(&tattr, PTHREAD_CREATE_JOINABLE);
 
+	tick = getticks();
 	while(t < NUMTHREADS)
 	{
 		rc = pthread_create(&threads[t], &tattr, pthr_doTasks, (void*) &threadInfs[t]);
@@ -89,12 +92,7 @@ void blockQR()
 		t ++;
 	}
 
-	pthread_mutex_lock(&sigMutex);
-
-	//broadcast cond
 	tCondMet = 1;
-	pthread_cond_broadcast(&tCond);
-	pthread_mutex_unlock(&sigMutex);
 
 	t = 0;
 
@@ -105,8 +103,13 @@ void blockQR()
 		t ++;
 	}
 
+	tock = getticks();
+	printf("tiled CPU in %5.2f ms\n", (double)(tock - tick)/3.8e9*1000);
+
+	tick = getticks();
 	cudaQRFull(matComp, ma, na);
-	printf("tiled R:\n");
+	tock = getticks();
+	printf("tiled GPU in %5.2f ms\n", (double)(tock - tick)/3.8e9*1000);
 	//printMatrix(matA, ma, na, ma);
 
 	/*for(k = 0; k < minpq ; k ++)
@@ -155,6 +158,33 @@ void blockQR()
 	pthread_attr_destroy(&tattr);
 }
 
+int pthr_getNextTask(pthread_mutex_t* mutex, pthread_cond_t* cond, int* condMet, Task* t, Task* Grid, int taskM, int taskN)
+{
+	int ret = TASK_NONE;
+	while(1)
+	{
+		pthread_mutex_lock(mutex);
+		if(*condMet == 1)
+			ret = getNextTask(t, Grid, taskM, taskN);
+		
+		if(ret == TASK_NONE)
+			pthread_cond_wait(cond, mutex);
+		else break;
+	}
+	
+	pthread_mutex_unlock(mutex);
+
+	return ret;
+}
+
+void pthr_doneATask(pthread_mutex_t* mutex, pthread_cond_t* cond, int* condMet, Task* taskgrid, int tM, int tN, Task doneTask)
+{
+	pthread_mutex_lock(mutex);
+	doneATask(taskgrid, tM, tN, doneTask);
+	doPthrBcast(mutex, cond, condMet);
+	pthread_mutex_unlock(mutex);
+}
+
 void* pthr_doTasks(void* threadinfoptr)
 {
 	int nextTask;
@@ -163,7 +193,7 @@ void* pthr_doTasks(void* threadinfoptr)
 	Task* taskGrid, toDoTask;
 
 	int *condMet;
-	pthread_mutex_t *tMutex, *sigMutex;
+	pthread_mutex_t *tMutex;
 	pthread_cond_t *tCond;
 
 	struct ThreadInfo localThreadInf;
@@ -181,45 +211,24 @@ void* pthr_doTasks(void* threadinfoptr)
 	taskN = localThreadInf.taskN;
 
 	tMutex = localThreadInf.getTaskMutex;
-	sigMutex = localThreadInf.getSigMutex;
 	tCond = localThreadInf.newTasksCond;
-	condMet = localThreadInf.condMet;	
+	condMet = localThreadInf.condMet;
 
 	while(nextTask != TASK_DONE)
 	{
-		//pthread_cond_wait
-		pthread_mutex_lock(sigMutex);
-		while(!*condMet)
-		{
-			pthread_cond_wait(tCond, sigMutex);
-		}
-
-		*condMet = 0;
-		pthread_mutex_unlock(sigMutex);
-
-		pthread_mutex_lock(tMutex);
 		//fetch next task
-		nextTask = getNextTask(&toDoTask, taskGrid, taskM, taskN);
-
-		//release mutex
-		pthread_mutex_unlock(tMutex);
-
-		doPthrBcast(sigMutex, tCond, condMet);
+		nextTask = pthr_getNextTask(tMutex, tCond, condMet, &toDoTask, taskGrid, taskM, taskN);
 
 		//execute task
 		if(nextTask == TASK_AVAIL)//not TASK_NONE or TASK_DONE
 		{
 			doATask(toDoTask, mat, b, ldm, workingVect);
 
-			pthread_mutex_lock(tMutex);
 			//finish task
-			doneATask(taskGrid, taskM, taskN, toDoTask);
-			pthread_mutex_unlock(tMutex);
-			
-			doPthrBcast(sigMutex, tCond, condMet);
+			pthr_doneATask(tMutex, tCond, condMet, taskGrid, taskM, taskN, toDoTask);
 		}
 	}
-	doPthrBcast(sigMutex, tCond, condMet);
+	doPthrBcast(tMutex, tCond, condMet);
 
 	pthread_exit(NULL);
 }
@@ -244,7 +253,7 @@ void doATask(Task t, float* mat, int b, int ldm, float* colVect)
 			blockV = mat + CO((t.k*b),(t.k*b),ldm);
 			qRSingleBlock(blockV, b, b, ldm, colVect);
 			//cudaQRS(blockV, ldm);
-			//printf("qr %d,%d\n", t.k, t.k);
+			printf("qr %d,%d\n", t.k, t.k);
 			break;
 		}
 		case SAPP:
@@ -253,7 +262,7 @@ void doATask(Task t, float* mat, int b, int ldm, float* colVect)
 			blockA = mat + CO((t.k*b),(t.m*b),ldm);
 			applySingleBlock(blockA, b, b, ldm, blockV);
 			//cudaSAPP(blockV, blockA, ldm);
-			//printf("sapp %d,%d %d,%d\n", t.k, t.k, t.k, t.m);
+			printf("sapp %d,%d %d,%d\n", t.k, t.k, t.k, t.m);
 			break;
 		}
 		case QRD:
@@ -262,7 +271,7 @@ void doATask(Task t, float* mat, int b, int ldm, float* colVect)
 			blockB = mat + CO((t.l*b),(t.k*b),ldm);
 			qRDoubleBlock(blockA, b, b, blockB, b, ldm, colVect);
 			//cudaQRD(blockA, blockB, ldm);
-			//printf("qrd %d,%d %d,%d\n", t.k, t.k, t.l, t.k);
+			printf("qrd %d,%d %d,%d\n", t.k, t.k, t.l, t.k);
 			break;
 		}
 		case DAPP:
@@ -272,7 +281,7 @@ void doATask(Task t, float* mat, int b, int ldm, float* colVect)
 			blockB = mat + CO((t.l*b),(t.m*b),ldm);
 			applyDoubleBlock(blockA, b, blockB, b, b, ldm, blockV);
 			//cudaDAPP(blockV, blockA, blockB, ldm);
-			//printf("dapp %d,%d %d,%d %d,%d\n", t.l, t.k, t.k, t.m, t.l, t.m);
+			printf("dapp %d,%d %d,%d %d,%d\n", t.l, t.k, t.k, t.m, t.l, t.m);
 			break;
 		}
 	}

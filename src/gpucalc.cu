@@ -121,32 +121,7 @@ __device__ void applyHH(float blockRow[],// the 32*32 matrix block to compute ov
 		blockRow[k] = hhVectorelem;//insert essential part of vector below diagonal in column k of block
 }
 
-__global__ void doQRS(float* matrix, int ldm)
-{
-	__shared__ float workingVector[32];
 
-	unsigned int tid = threadIdx.x;
-
-	int k, j;
-
-	float bRow[32];
-
-	for(j = 0; j < 32; j ++)//load row of block into local
-		bRow[j] = matrix[(j*ldm) + tid];
-
-	for(k = 0; k < 32; k ++)
-	{
-		//calculate the kth hh vector from the kth column of the tidth row of the matrix
-		calcHH(bRow[k], tid, workingVector, k);
-
-		//calculate the application of the hhvector along row tid
-		applyHH(bRow, tid, workingVector, k, workingVector[tid]);
-	}
-
-	//copy row back
-	for(j = 0; j < 32; j ++)
-		matrix[(j*ldm) + tid] = bRow[j];
-}
 
 __device__ void calcDoubleHH	(float topElem,//element of top block
 				float lowElem,
@@ -279,51 +254,6 @@ __device__ void applyDoubleHH	(float topRow[],
 	lowRow[k] = hhVectorElem;
 }
 
-__global__ void doQRD(float* blockA, float* blockB, int ldm)
-{
-	__shared__ float workingVector[64];
-
-	unsigned int tid = threadIdx.x;
-
-	int k, j;
-
-	float topRow[32];
-	float lowRow[32];
-	
-	for(j = 0; j < 32; j ++)//for each column
-	{
-		//read top block
-		topRow[j] = blockA[(j*ldm) + tid];
-
-		//read lower block into lower 32x32 square
-		lowRow[j] = blockB[(j*ldm) + tid];
-	}
-
-	for(k = 0; k < 32; k ++)
-	{
-		//calculate and store the vector
-		calcDoubleHH	(topRow[k],
-				lowRow[k],
-				tid,
-				workingVector,
-				k);
-
-		//apply vector to both tidth rows of the matrix
-		applyDoubleHH	(topRow,
-				lowRow,
-				tid,
-				workingVector,
-				k,
-				workingVector[tid + 32]);
-	}
-
-	for(j = 0; j < 32; j ++)
-	{
-		//write back to correct blocks
-		blockA[(j*ldm) + tid] = topRow[j];
-		blockB[(j*ldm) + tid] = lowRow[j];
-	}
-}
 
 __device__ void applyHHPrime	(float velem,
 				unsigned int tid,
@@ -365,44 +295,7 @@ __device__ void applyHHPrime	(float velem,
 	}
 }
 
-__global__ void doSAPP(float* blockV, float* blockA, int ldm)
-{
-	__shared__ float workingVector[32];
 
-	unsigned int tid = threadIdx.x;
-	float hhVelems[32];
-	float applyRow[32];
-
-	int j, k;
-
-	for(j = 0; j < 32; j ++)//load tidth row of hhvectors
-	{
-		if(tid == j) 
-			hhVelems[j] = 1.0;
-		if(tid < j)
-			hhVelems[j] = 0.0;
-		if(tid > j)
-			hhVelems[j] = blockV[(j*ldm) + tid];
-
-		//load row to apply
-		applyRow[j] = blockA[(j*ldm) + tid];
-	}
-
-	for(k = 0; k < 32; k ++)
-	{
-		
-		//apply kth vector to columns (1:32) of A
-
-		applyHHPrime	(hhVelems[k],//tidth element of kth vector
-				tid,
-				applyRow,
-				k,
-				workingVector);
-	}
-		
-	for(j = 0; j < 32; j ++)
-		blockA[(j*ldm) + tid] = applyRow[j];
-}
 
 __device__ void applyDoubleHHPrime	(float velem,
 					unsigned int tid,
@@ -461,6 +354,119 @@ __device__ void applyDoubleHHPrime	(float velem,
 		lowAppRow[j] += z;
 	}
 }
+
+__global__ void doQRS(float* matrix, int ldm)
+{
+	__shared__ float workingVector[32];
+
+	unsigned int tid = threadIdx.x;
+
+	int k, j;
+
+	float bRow[32];
+
+	for(j = 0; j < 32; j ++)//load row of block into local
+		bRow[j] = matrix[(j*ldm) + tid];
+
+	for(k = 0; k < 32; k ++)
+	{
+		//calculate the kth hh vector from the kth column of the tidth row of the matrix
+		calcHH(bRow[k], tid, workingVector, k);
+
+		//calculate the application of the hhvector along row tid
+		applyHH(bRow, tid, workingVector, k, workingVector[tid]);
+	}
+
+	//copy row back
+	for(j = 0; j < 32; j ++)
+		matrix[(j*ldm) + tid] = bRow[j];
+}
+
+__global__ void doQRD(float* blockA, float* blockB, int ldm)
+{
+	__shared__ float workingVector[64];
+
+	unsigned int tid = threadIdx.x;
+
+	int k, j;
+
+	float topRow[32];
+	float lowRow[32];
+	
+	for(j = 0; j < 32; j ++)//for each column
+	{
+		//read top block
+		topRow[j] = blockA[(j*ldm) + tid];
+
+		//read lower block into lower 32x32 square
+		lowRow[j] = blockB[(j*ldm) + tid];
+	}
+
+	for(k = 0; k < 32; k ++)
+	{
+		//calculate and store the vector
+		calcDoubleHH	(topRow[k],
+				lowRow[k],
+				tid,
+				workingVector,
+				k);
+
+		//apply vector to both tidth rows of the matrix
+		applyDoubleHH	(topRow,
+				lowRow,
+				tid,
+				workingVector,
+				k,
+				workingVector[tid + 32]);
+	}
+
+	for(j = 0; j < 32; j ++)
+	{
+		//write back to correct blocks
+		blockA[(j*ldm) + tid] = topRow[j];
+		blockB[(j*ldm) + tid] = lowRow[j];
+	}
+}
+
+__global__ void doSAPP(float* blockV, float* blockA, int ldm)
+{
+	__shared__ float workingVector[32];
+
+	unsigned int tid = threadIdx.x;
+	float hhVelems[32];
+	float applyRow[32];
+
+	int j, k;
+
+	for(j = 0; j < 32; j ++)//load tidth row of hhvectors
+	{
+		if(tid == j) 
+			hhVelems[j] = 1.0;
+		if(tid < j)
+			hhVelems[j] = 0.0;
+		if(tid > j)
+			hhVelems[j] = blockV[(j*ldm) + tid];
+
+		//load row to apply
+		applyRow[j] = blockA[(j*ldm) + tid];
+	}
+
+	for(k = 0; k < 32; k ++)
+	{
+		
+		//apply kth vector to columns (1:32) of A
+
+		applyHHPrime	(hhVelems[k],//tidth element of kth vector
+				tid,
+				applyRow,
+				k,
+				workingVector);
+	}
+		
+	for(j = 0; j < 32; j ++)
+		blockA[(j*ldm) + tid] = applyRow[j];
+}
+
 __global__ void doDAPP(float* blockV, float* blockA, float* blockB, int ldm)
 {
 	__shared__ float workingVector[64];
@@ -472,8 +478,6 @@ __global__ void doDAPP(float* blockV, float* blockA, float* blockB, int ldm)
 	float vElems[32];
 	float topApplyRow[32];
 	float lowApplyRow[32];
-
-	//float topApplyElem, lowApplyElem;
 
 	for(j = 0; j < 32; j ++)//load vElems with bottom hh vector row
 	{
@@ -502,6 +506,7 @@ __global__ void doDAPP(float* blockV, float* blockA, float* blockB, int ldm)
 	}
 }
 
+extern "C"
 void cudaQRFull(float* mat, int m, int n)
 {
 	int i, j, k, p, q, s;
@@ -576,6 +581,7 @@ void cudaQRFull(float* mat, int m, int n)
 		cudaStreamDestroy(streams[k]);
 }
 
+extern "C"
 void cudaDAPP(float* vBlock, float* aBlock, float* bBlock, int ldm)
 {
 	float* dev_bV, *dev_bA, *dev_bB;
@@ -605,6 +611,7 @@ void cudaDAPP(float* vBlock, float* aBlock, float* bBlock, int ldm)
 	cudaFree(dev_bV);
 }
 
+extern "C"
 void cudaSAPP(float* vBlock, float* block, int ldm)
 {
 	float* dev_bV, *dev_bB;
@@ -680,3 +687,4 @@ void cudaQRD(float* blockA, float* blockB, int ldm)
 	
 	cudaFree(dev_bA);
 }
+
