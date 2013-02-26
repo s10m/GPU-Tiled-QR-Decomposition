@@ -22,7 +22,7 @@
 #define RAND 1
 #define EYE 2
 
-#define NUMTHREADS 1
+#define NUMTHREADS 8
 
 #define EPSILON 0.006
 
@@ -37,7 +37,7 @@ int main	(int argc,
 void blockQR()
 {
 	float* matA = NULL, *matComp = NULL;
-	int ma = 512, na = 512, b = 32, i, j ,k, p = ma/b, q = na/b, t = 0, rc, minpq = p < q ? p : q, ret;
+	int ma = 2048, na = 2048, b = 32, i, j ,k, p = ma/b, q = na/b, t = 0, rc, minpq = p < q ? p : q, ret;
 
 	ticks tick, tock;
 
@@ -157,34 +157,80 @@ void blockQR()
 	free(taskGrid);
 	pthread_attr_destroy(&tattr);
 }
-
-int pthr_getNextTask(pthread_mutex_t* mutex, pthread_cond_t* cond, int* condMet, Task* t, Task* Grid, int taskM, int taskN)
+/**
+ * \brief Fetches tasks from the task grid until a valid task is returned or there are no more tasks possible
+ * \param mutex The mutex locking access to the task grid
+ * \param cond The condition to wait to be broadcast, representing a new task available
+ * \param t The task to fill the data into
+ * \param Grid The grid of tasks
+ * \param taskM Number of rows of tasks
+ * \param taskN Number of columns of tasks
+ * \returns An integer relating to the status of the task in t
+ */
+int pthr_getNextTask	(pthread_mutex_t* mutex,
+			pthread_cond_t* cond,
+			int* condMet,
+			Task* t,
+			Task* Grid,
+			int taskM, int taskN)
 {
+	//initialise return value 
 	int ret = TASK_NONE;
+
+	//lock mutex
+	pthread_mutex_lock(mutex);
+
+	//repeat until have valid task
 	while(1)
 	{
-		pthread_mutex_lock(mutex);
-		if(*condMet == 1)
-			ret = getNextTask(t, Grid, taskM, taskN);
+		//fetch a task from the grid
+		ret = getNextTask(t, Grid, taskM, taskN);
 		
+		//if no ready tasks
 		if(ret == TASK_NONE)
+			//wait until tasks are ready
 			pthread_cond_wait(cond, mutex);
-		else break;
+		else break;//otherwise break with the task
 	}
-	
+	//release the mutex
 	pthread_mutex_unlock(mutex);
 
 	return ret;
 }
 
-void pthr_doneATask(pthread_mutex_t* mutex, pthread_cond_t* cond, int* condMet, Task* taskgrid, int tM, int tN, Task doneTask)
+/**
+ * \brief Registers a task as complete in the task grid
+ * \param mutex The mutex controlling access to the task grid
+ * \param cond The condition to broadcast
+ * \param taskgrid The grid of tasks
+ * \param tM Rows of tasks
+ * \param tN Columns of tasks
+ * \param doneTask The information about the completed task
+ */
+void pthr_doneATask	(pthread_mutex_t* mutex,
+			pthread_cond_t* cond,
+			int* condMet,
+			Task* taskgrid,
+			int tM, int tN,
+			Task doneTask)
 {
+	//acquire mutex
 	pthread_mutex_lock(mutex);
+
+	//register doneTask as finished in the task grid
 	doneATask(taskgrid, tM, tN, doneTask);
-	doPthrBcast(mutex, cond, condMet);
+	
+	//broadcast there might be more tasks now
+	doPthrBcast(cond, condMet);
+
+	//release mutex
 	pthread_mutex_unlock(mutex);
 }
 
+/**
+ * \brief Thread code to execute tasks while there are some available then return
+ * \param threadinfoptr A pointer to a struct ThreadInfo containing data used by the thread.
+ */
 void* pthr_doTasks(void* threadinfoptr)
 {
 	int nextTask;
@@ -198,6 +244,7 @@ void* pthr_doTasks(void* threadinfoptr)
 
 	struct ThreadInfo localThreadInf;
 
+	//get data in local variables
 	localThreadInf = *((struct ThreadInfo*)threadinfoptr);
 	nextTask = 1;
 	
@@ -214,13 +261,14 @@ void* pthr_doTasks(void* threadinfoptr)
 	tCond = localThreadInf.newTasksCond;
 	condMet = localThreadInf.condMet;
 
+	//while there are tasks available
 	while(nextTask != TASK_DONE)
 	{
 		//fetch next task
 		nextTask = pthr_getNextTask(tMutex, tCond, condMet, &toDoTask, taskGrid, taskM, taskN);
 
-		//execute task
-		if(nextTask == TASK_AVAIL)//not TASK_NONE or TASK_DONE
+		//execute task if not TASK_NONE or TASK_DONE
+		if(nextTask == TASK_AVAIL)
 		{
 			doATask(toDoTask, mat, b, ldm, workingVect);
 
@@ -228,24 +276,36 @@ void* pthr_doTasks(void* threadinfoptr)
 			pthr_doneATask(tMutex, tCond, condMet, taskGrid, taskM, taskN, toDoTask);
 		}
 	}
-	doPthrBcast(tMutex, tCond, condMet);
+	
+	//broadcast to release threads that may be waiting
+	doPthrBcast(tCond, condMet);
 
+	//return
 	pthread_exit(NULL);
 }
 
-void doPthrBcast(pthread_mutex_t* mutex, pthread_cond_t* cond, int* condmet)
+void doPthrBcast(pthread_cond_t* cond, int* condmet)
 {
-	pthread_mutex_lock(mutex);
 	//broadcast cond
-	*condmet = 1;
 	pthread_cond_broadcast(cond);
-	pthread_mutex_unlock(mutex);
 }
 
-void doATask(Task t, float* mat, int b, int ldm, float* colVect)
+/**
+ * \brief Based on the type of task t is, executes t on the matrix mat.
+ * \param t A task to execute
+ * \param mat The matrix to perform the operation on
+ * \param b The block size we are using
+ * \param ldm The leading dimension of mat
+ * \param colVect A pre-allocated 2b*b array of floats for using in the computation
+ */
+void doATask	(Task t,
+		float* mat,
+		int b, int ldm,
+		float* colVect)
 {
 	float *blockV, *blockA, *blockB;
 
+	//switch based on the type of task we've got
 	switch(t.taskType)
 	{
 		case QRS:
@@ -253,7 +313,7 @@ void doATask(Task t, float* mat, int b, int ldm, float* colVect)
 			blockV = mat + CO((t.k*b),(t.k*b),ldm);
 			qRSingleBlock(blockV, b, b, ldm, colVect);
 			//cudaQRS(blockV, ldm);
-			printf("qr %d,%d\n", t.k, t.k);
+			//printf("qr %d,%d\n", t.k, t.k);
 			break;
 		}
 		case SAPP:
@@ -262,7 +322,7 @@ void doATask(Task t, float* mat, int b, int ldm, float* colVect)
 			blockA = mat + CO((t.k*b),(t.m*b),ldm);
 			applySingleBlock(blockA, b, b, ldm, blockV);
 			//cudaSAPP(blockV, blockA, ldm);
-			printf("sapp %d,%d %d,%d\n", t.k, t.k, t.k, t.m);
+			//printf("sapp %d,%d %d,%d\n", t.k, t.k, t.k, t.m);
 			break;
 		}
 		case QRD:
@@ -271,7 +331,7 @@ void doATask(Task t, float* mat, int b, int ldm, float* colVect)
 			blockB = mat + CO((t.l*b),(t.k*b),ldm);
 			qRDoubleBlock(blockA, b, b, blockB, b, ldm, colVect);
 			//cudaQRD(blockA, blockB, ldm);
-			printf("qrd %d,%d %d,%d\n", t.k, t.k, t.l, t.k);
+			//printf("qrd %d,%d %d,%d\n", t.k, t.k, t.l, t.k);
 			break;
 		}
 		case DAPP:
@@ -281,7 +341,7 @@ void doATask(Task t, float* mat, int b, int ldm, float* colVect)
 			blockB = mat + CO((t.l*b),(t.m*b),ldm);
 			applyDoubleBlock(blockA, b, blockB, b, b, ldm, blockV);
 			//cudaDAPP(blockV, blockA, blockB, ldm);
-			printf("dapp %d,%d %d,%d %d,%d\n", t.l, t.k, t.k, t.m, t.l, t.m);
+			//printf("dapp %d,%d %d,%d %d,%d\n", t.l, t.k, t.k, t.m, t.l, t.m);
 			break;
 		}
 	}
@@ -294,7 +354,7 @@ void doATask(Task t, float* mat, int b, int ldm, float* colVect)
  * \param m The number of rows in the block
  * \param n The number of columns in the block
  * \param ldb The leading dimension of the matrix
- * \param hhVectors A pointer to a pre-allocated array for use as a scratchpad to store the householder vector
+ * \param hhVector A pointer to a pre-allocated array for use as a scratchpad to store the householder vector
  *
  * \returns void
  */
@@ -306,7 +366,6 @@ void qRSingleBlock	(float* block,
 {
 	int k;
 	float* xVect;
-//	float* hhVector = newMatrix(m-1, 1);
 
 	/*printf("input to QRS:\n");
 	printMatrix(block, m, n, ldb);*/
@@ -325,7 +384,6 @@ void qRSingleBlock	(float* block,
 		//replace column with essential part of vector	
 		insSingleHHVector(block+CO(k+1,k,ldb), m - k - 1, hhVector);
 	}
-	//deleteMatrix(hhVector);
 }
 
 /**
@@ -342,6 +400,7 @@ void qRSingleBlock	(float* block,
  * \param blockB A pointer to the first element of the "bottom" block
  * \param bm The number of rows in blockB
  * \param ldm The leading dimension of the main matrix
+ * \param hhVector A pre-allocated array for using during the computation
  *
  * \returns void
  */
@@ -355,7 +414,6 @@ void qRDoubleBlock	(float* blockA,
 {
 	int k;
 	float* xVectB, *xVectA;
-	//float* hhVector = newMatrix(am + bm, 1), *freeThisptr = hhVector;
 	/*printf("input to QRD:\n");
 	printMatrix(blockA, am, an, ldm);
 	printMatrix(blockB, bm, an, ldm);*/
@@ -378,7 +436,6 @@ void qRDoubleBlock	(float* blockA,
 		//place the kth vector in place overwriting the bottom block
 		insSingleHHVector(xVectB, bm, hhVector + am - k - 1);
 	}
-	//deleteMatrix(freeThisptr);
 }
 
 /**

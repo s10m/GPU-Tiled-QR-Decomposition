@@ -1,7 +1,7 @@
 #ifndef QRDECOMP_H
 #define QRDECOMP_H
 void* pthr_doTasks(void*);
-void doPthrBcast(pthread_mutex_t*, pthread_cond_t*, int*);
+void doPthrBcast(pthread_cond_t*, int*);
 
 struct ThreadInfo
 {
