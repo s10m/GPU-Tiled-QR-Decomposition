@@ -2,230 +2,7 @@ extern "C" {
 #include "../include/gpucalc.h"
 }
 
-#define cuda_maxqueues 1
-
-#define QUEUES
-#ifdef QUEUES
-/** Struct for a task queue. */
-struct queue_cuda {
-    /* Indices to the first and last elements. */
-    int first, last;
-
-    /* Number of elements in this queue. */
-    volatile int count;
-
-    /* Number of elements in the recycled list. */
-    volatile int rec_count;
-
-    /* The queue data. */
-    volatile int *data;
-
-    /* The recycling list. */
-    volatile int *rec_data;
-};
-
-/* Timer functions. */
-#ifdef TIMERS
-    #define TIMER_TIC_ND if ( threadIdx.x == 0 ) tic = clock();
-    #define TIMER_TOC_ND(tid) toc = clock(); if ( threadIdx.x == 0 ) atomicAdd( &cuda_timers[tid] , ( toc > tic ) ? (toc - tic) : ( toc + (0xffffffff - tic) ) );
-    #define TIMER_TIC clock_t tic; if ( threadIdx.x == 0 ) tic = clock();
-    #define TIMER_TOC(tid) clock_t toc = clock(); if ( threadIdx.x == 0 ) atomicAdd( &cuda_timers[tid] , ( toc > tic ) ? (toc - tic) : ( toc + (0xffffffff - tic) ) );
-    #define TIMER_TIC2_ND if ( threadIdx.x == 0 ) tic2 = clock();
-    #define TIMER_TOC2_ND(tid) toc2 = clock(); if ( threadIdx.x == 0 ) atomicAdd( &cuda_timers[tid] , ( toc2 > tic2 ) ? (toc2 - tic2) : ( toc2 + (0xffffffff - tic2) ) );
-    #define TIMER_TIC2 clock_t tic2; if ( threadIdx.x == 0 ) tic2 = clock();
-    #define TIMER_TOC2(tid) clock_t toc2 = clock(); if ( threadIdx.x == 0 ) atomicAdd( &cuda_timers[tid] , ( toc2 > tic2 ) ? (toc2 - tic2) : ( toc2 + (0xffffffff - tic2) ) );
-#else
-    #define TIMER_TIC_ND
-    #define TIMER_TOC_ND(tid)
-    #define TIMER_TIC
-    #define TIMER_TOC(tid)
-    #define TIMER_TIC2
-    #define TIMER_TOC2(tid)
-#endif
-
-/** Timers for the cuda parts. */
-enum {
-    tid_mutex = 0,
-    tid_queue,
-    tid_gettask,
-    tid_memcpy,
-    tid_update,
-    tid_pack,
-    tid_sort,
-    tid_pair,
-    tid_self,
-    tid_potential,
-    tid_potential4,
-    tid_total,
-    tid_count
-    };
-
-/* Timers. */
-__device__ float cuda_timers[ tid_count ];
-
-
-/* The per-SM task queues. */
-__device__ struct queue_cuda cuda_queues[ cuda_maxqueues ];
-__constant__ int cuda_nrqueues;
-__constant__ int cuda_queue_size;
-
-
-/**
- * @brief Lock a device mutex.
- *
- * @param m The mutex.
- *
- * Loops until the mutex can be set. Note that only one thread
- * can do this at a time, so to synchronize blocks, only a single thread of
- * each block should call it.
- */
-
-__device__ void cuda_mutex_lock ( int *m ) {
-    TIMER_TIC
-    while ( atomicCAS( m , 0 , 1 ) != 0 );
-    TIMER_TOC( tid_mutex )
-    }
-
-
-/**
- * @brief Attempt to lock a device mutex.
- *
- * @param m The mutex.
- *
- * Try to grab the mutex. Note that only one thread
- * can do this at a time, so to synchronize blocks, only a single thread of
- * each block should call it.
- */
-
-__device__ int cuda_mutex_trylock ( int *m ) {
-    TIMER_TIC
-    int res = atomicCAS( m , 0 , 1 ) == 0;
-    TIMER_TOC( tid_mutex )
-    return res;
-    }
-
-
-/**
- * @brief Unlock a device mutex.
- *
- * @param m The mutex.
- *
- * Does not check if the mutex had been locked.
- */
-
-__device__ void cuda_mutex_unlock ( int *m ) {
-    TIMER_TIC
-    atomicExch( m , 0 );
-    TIMER_TOC( tid_mutex )
-    }
-    
-    
-/**
- * @brief Get a task ID from the given queue.
- *
- */
- 
-__device__ int cuda_queue_gettask ( struct queue_cuda *q ) {
-
-    int ind, tid = -1;
-    
-    /* Don't even try... */
-    if ( q->rec_count == q->count )
-        return -1;
-
-    /* Get the index of the next task. */
-    ind = atomicAdd( &q->first , 1 );
-        
-    /* Wrap the index. */
-    ind %= cuda_queue_size; 
-
-    /* Loop until there is a valid task at that index. */
-    while ( q->rec_count < q->count && ( tid = q->data[ind] ) < 0 );
-    
-    /* Scratch the task from the queue */
-    if ( tid >= 0 )
-        q->data[ind] = -1;
-
-    /* Return the acquired task ID. */
-    return tid;
-    
-    }
-
-
-/**
- * @brief Put a task onto the given queue.
- *
- * @param tid The task ID to add to the end of the queue.
- */
- 
-__device__ void cuda_queue_puttask ( struct queue_cuda *q , int tid ) {
-
-    int ind;
-
-    /* Get the index of the next task. */
-    ind = atomicAdd( &q->last , 1 ) % cuda_queue_size;
-    
-    /* Wait for the slot in the queue to be empty. */
-    while ( q->data[ind] != -1 );
-
-    /* Write the task back to the queue. */
-    q->data[ind] = tid;
-    
-    }
-    
-    
-/**
- * @brief Get a task from the given task queue.
- *
- * @return A valid task ID from the queue or -1 if the queue
- * is empty.
- *
- * Picks tasks from the queue sequentially and checks if they
- * can be computed. If not, they are returned to the queue.
- *
- * This routine blocks until a valid task is picked up, or the
- * specified queue is empty.
- */
- 
-__device__ int runner_cuda_gettask ( struct queue_cuda *q , int steal ) {
-
-    int tid = -1, cid, cjd;
-    
-    TIMER_TIC
-    
-    /* Main loop. */
-    while ( ( tid = cuda_queue_gettask( q ) ) >= 0 ) {
-    
-        /* Check if the task is doable. */
-        if ( /*task[tid] can be executed*/0 )
-            break;
-                
-        /* Otherwise, put this task back into the queue. */
-        else 
-            cuda_queue_puttask( q , tid );
-        }
-        
-    /* Put this task into the recycling queue, if needed. */
-    if ( tid >= 0 ) {
-        if ( steal )
-            atomicSub( (int *)&q->count , 1 );
-        else
-            q->rec_data[ atomicAdd( (int *)&q->rec_count , 1 ) ] = tid;
-        }
-        
-    TIMER_TOC(tid_queue);
-        
-    /* Return whatever we got. */
-    return tid;
-
-    }
-
-/*!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!*/
-#endif
+#include <stdio.h>
 
 #define NUMSTREAMS 16
 #define TID threadIdx.x
@@ -250,18 +27,16 @@ __device__ void calcHH(	float matelem,//the block containing a column to calcula
 			float hhVector[],//the array to store the resulting vector in
 			int k)//the step at which this was called
 {
-	float tmp;
+	float tmp, localdiv;
 	int sign;
 
 	//read vectors in from below the diagonal(k)
 	if(tid >= k)
 		hhVector[tid] = matelem;
-	else if(tid < k)//zero above diagonal
-		hhVector[tid] = 0.0;
+	if(tid < k)//zero above diagonal
+		hhVector[tid] = 0;
 
 	tmp = hhVector[tid];
-	//calculate sign(only used by kth thread
-	sign = tmp >= 0 ? 1 : -1;
 	
 	//square each element
 	hhVector[tid] *= hhVector[tid];
@@ -270,32 +45,43 @@ __device__ void calcHH(	float matelem,//the block containing a column to calcula
 	//reduction to calculate the sum of squares of the 32 element vector
 	reduceSum(hhVector, tid, 32);
 
-	if(tid == k)//in kth element
+	//calculate sign*norm and put in local variable
+	localdiv = sqrt(hhVector[0]);
+	if(tid == k)
+		printf("GPU norm is %5.3f\n",localdiv);
+
+	//if norm not 0
+	if(localdiv != 0.0)
 	{
-		//calculate sign*norm and put in kth element
-		hhVector[k] = sign * sqrt(hhVector[0]);
+		hhVector[tid] = matelem;
 
-		//if norm not 0
-		if(hhVector[k] != 0.0)
-		{
-			//add element in block at (k,k) to norm and store in vector
-			hhVector[k] = tmp + hhVector[k];
+		sign = hhVector[k] >= 0 ? 1 : -1;
+		
+		localdiv *= sign;
+		//add element in block at (k,k) to norm and store in vector
+		localdiv += hhVector[k];
 
-			//divide because want v(k+1:m) = v(k+1:m)/v(k) = v(k+1:m) * (1/v(k))
-			hhVector[k] = 1.0/hhVector[k];
-		}
-		else//if norm is zero, 
-			hhVector[k] = 1.0;
+		//divide because want v(k+1:m) = v(k+1:m)/v(k) = v(k+1:m) * (1/v(k))
+		localdiv = 1.0/localdiv;
 	}
+	else//if norm is zero, 
+		localdiv = 1.0;
 
-	// use reduceVector[0] to compute the local value multiplied by 1/reduceVector[0]
+	if(tid < k)
+		hhVector[tid] = 0;
+	if(tid == k)
+		hhVector[tid] = 1;
+	if(tid > k)
+		hhVector[tid] = matelem * localdiv;
+	/*// use reduceVector[0] to compute the local value multiplied by 1/reduceVector[0]
 	if(tid > k)
 		hhVector[tid] = tmp * hhVector[k];
 	else if(tid < k)
-		hhVector[tid] = 0.0;//zero above diagonal
+		hhVector[tid] = 0;//zero above diagonal
 
-	if(tid == k)//apart from element 0
-		hhVector[k] = 1.0;//which is always 1
+	if(tid != k)//apart from element k
+		hhVector[tid] = 1/hhVector[k];//hhVector[k] = 1;//which is always 1
+//	hhVector[tid] = hhVector[k];*/
 }
 
 __device__ void applyHH(float blockRow[],// the 32*32 matrix block to compute over
@@ -348,8 +134,6 @@ __device__ void applyHH(float blockRow[],// the 32*32 matrix block to compute ov
 	if(tid > k)//store essential part of vector below diagonal
 		blockRow[k] = hhVectorelem;//insert essential part of vector below diagonal in column k of block
 }
-
-
 
 __device__ void calcDoubleHH	(float topElem,//element of top block
 				float lowElem,
@@ -719,9 +503,9 @@ __device__ void device_doQRD	(float* blockA, float* blockB, int ldm,
 	}
 }
 
-__global__ void doSAPP	(float* blockV,
-			float* blockA,
-			int ldm)
+__device__ void dev_doSAPP	(float* blockV,
+				float* blockA,
+				int ldm)
 {
 	__shared__ float workingVector[32];
 
@@ -774,6 +558,13 @@ __global__ void doSAPP	(float* blockV,
 	}
 }
 
+__global__ void doSAPP	(float* blockV,
+			float* blockA,
+			int ldm)
+{
+	dev_doSAPP(blockV, blockA, ldm);
+}
+
 __global__ void OLD_doSAPP(float* blockV, float* blockA, int ldm)
 {
 	__shared__ float workingVector[32];
@@ -782,43 +573,6 @@ __global__ void OLD_doSAPP(float* blockV, float* blockA, int ldm)
 	float hhVelems[32];
 	float applyRow[32];
 
-	int j, k;
-
-	for(j = 0; j < 32; j ++)//load tidth row of hhvectors
-	{
-		if(tid == j) 
-			hhVelems[j] = 1.0;
-		if(tid < j)
-			hhVelems[j] = 0.0;
-		if(tid > j)
-			hhVelems[j] = blockV[(j*ldm) + tid];
-
-		//load row to apply
-		applyRow[j] = blockA[(j*ldm) + tid];
-	}
-
-	for(k = 0; k < 32; k ++)
-	{
-		
-		//apply kth vector to columns (1:32) of A
-
-		applyHHPrime	(hhVelems[k],//tidth element of kth vector
-				tid,
-				applyRow,
-				k,
-				workingVector);
-	}
-		
-	for(j = 0; j < 32; j ++)
-		blockA[(j*ldm) + tid] = applyRow[j];
-}
-
-__device__ void device_doSAPP	(float* blockV, float* blockA, int ldm,
-				float workingVector[],
-				unsigned int tid,
-				float hhVelems[],
-				float applyRow[])
-{
 	int j, k;
 
 	for(j = 0; j < 32; j ++)//load tidth row of hhvectors
@@ -969,50 +723,15 @@ __global__ void doDAPP	(float* blockV,
 			bRow);
 }
 
-__device__ int calcNumTasks(int m, int n)
-{
-	//compute sum k=0-->n of (m-k)*(n-k)
-	int ret;
-
-	//get number of blocks in row/column
-	m = m/32;
-	n = n/32;
-	
-	//ret = mn^2/2 - n^3/6 + mn/2 + n/6
-	ret = m*n*n/2;
-
-	ret -= n*n*n/6;
-
-	ret += m*n/2;
-	
-	ret += n/6;
-
-	return ret;
-}
-
 __global__ void taskKernel(float* matrix, int m, int n)
 {
-	__shared__ float workVector[64];
+	unsigned int tid = threadIdx.x;
+	__shared__ float workVector[32];
 	
-	float 	vElems[32],
-	 	topRow[32],
-		lowRow[32];
+	float vElems[32];
+	float topRow[32];
+	float lowRow[32];
 
-	int numTasks, rec_last, tid;
-
-	struct queue_cuda q;
-
-	numTasks = calcNumTasks(m, n);
-
-	while(rec_last != numTasks)
-	{
-		//fetch a task
-		tid = runner_cuda_gettask(&q, 0);
-		
-		//execute based on type
-		
-		//update task grid with tasks, and cuda queue with tids
-	}
 }
 
 extern "C"

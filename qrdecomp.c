@@ -22,7 +22,7 @@
 #define RAND 1
 #define EYE 2
 
-#define NUMTHREADS 8
+#define NUMTHREADS 1
 
 #define EPSILON 0.006
 
@@ -37,7 +37,7 @@ int main	(int argc,
 void blockQR()
 {
 	float* matA = NULL, *matComp = NULL;
-	int ma = 2048, na = 2048, b = 32, i, j ,k, p = ma/b, q = na/b, t = 0, rc, minpq = p < q ? p : q, ret;
+	int ma = 128, na = 128, b = 32, i, j ,k, p = ma/b, q = na/b, t = 0, rc, minpq = p < q ? p : q, ret;
 
 	ticks tick, tock;
 
@@ -110,7 +110,7 @@ void blockQR()
 	cudaQRFull(matComp, ma, na);
 	tock = getticks();
 	printf("tiled GPU in %5.2f ms\n", (double)(tock - tick)/3.8e9*1000);
-	//printMatrix(matA, ma, na, ma);
+	printMatrix(matA, ma, 1, ma);
 
 	/*for(k = 0; k < minpq ; k ++)
 	{
@@ -148,7 +148,7 @@ void blockQR()
 	}*/
 
 	printf("Compare:\n");
-	//printMatrix(matComp, ma, na, ma);
+	printMatrix(matComp, ma, 1, ma);
 
 	checkEqual(matA, matComp, ma, na, ma);
 	printf("are equal\n");
@@ -798,6 +798,7 @@ void calcvkSingle	(float* x,
 
 	//take the euclidian norm of the original vector
 	norm = do2norm(x, l);
+	printf("norm is %5.3f\n", norm);
 	//calculate the new normalisation
 	beta += norm * sign;
 
