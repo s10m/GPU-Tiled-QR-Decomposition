@@ -5,7 +5,7 @@ void doPthrBcast(pthread_cond_t*, int*);
 
 struct ThreadInfo
 {
-	float* mat, *wspace;
+	float* mat, *wspace, *tau;
 	int ldm, b;
 
 	Task* taskGrid;
@@ -16,20 +16,21 @@ struct ThreadInfo
 	int *condMet;
 };
 
-void blockQR(void);
+void blockQR( int, int, int );
 
 float* newMatrix(int, int);
 void deleteMatrix(float*);
 void initMatrix(float*, int, int, int);
 void printMatrix(float*, int, int, int);
 void copyMatrix(float*, int, int, float*);
-void checkEqual(float*, float*, int, int, int);
+int checkEqual(float*, float*, int, int, int);
 
-void doATask(Task, float*, int, int, float*);
+void doATask(Task, float*, float*, int, int, float*);
 
 float* multAB(float*, int, int, int, float*, int, int);
 
 void qRSingleBlock(float*, int, int, int, float*);
+void qRSingleBlock_WY(float*, float*, int, int, int, float*);
 void qRDoubleBlock(float*, int, int, float*, int, int, float*);
 
 void applySingleBlock(float*, int, int, int, float*);
