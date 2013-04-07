@@ -11,7 +11,7 @@
 #include <errno.h>
 
 #include "include/gridscheduler.h"
-#include "include/gpucalc.h"
+//#include "include/gpucalc.h"
 #include "include/cycle.h"
 #include "qrdecomp.h"
 
@@ -19,8 +19,6 @@
 #define COB(i,j,bs,N) ((i*N*bs) +(j*bs))
 
 #define NUMTHREADS 8
-
-#define USE_WY
 
 #define EPSILON 0.001
 
@@ -32,10 +30,10 @@ int main	(int argc,
 	int numtests, mtiles, ntiles;
 
 	numtests = argc > 1 ? atoi(argv[1]) : 1;
-	mtiles = argc > 2 ? atoi(argv[2]) : 1;
-	ntiles = argc > 3 ? atoi(argv[3]) : 1;
+	mtiles = argc > 2 ? atoi(argv[2]) : 2;
+	ntiles = argc > 3 ? atoi(argv[3]) : 2;
 
-	blockQR( numtests, mtiles, ntiles );
+	tiledQR( numtests, mtiles, ntiles );
 
 	return 0;
 }
@@ -45,107 +43,46 @@ int main	(int argc,
    the same data. 
    Counts the number of times the outputs are the same and differ, also gathers
    basic timing information. */
-void blockQR( int numtests, int mtiles, int ntiles )
+void tiledQR( int numtests, int mtiles, int ntiles )
 {
-	float* matA = NULL, *matComp = NULL, *matData = NULL, *matTau = NULL;
-	int 	ma = mtiles*32, na = ntiles*32, b = 32,
-		i, j ,k, p = ma/b, q = na/b,
-		t = 0, rc, minpq = p < q ? p : q,
-		ret, times = 0, failures = 0, successes = 0;
+	float* 	matCPU = NULL, *matComp = NULL, *matData = NULL, *matTau = NULL;
+
+	int 	b = 32, m = mtiles*b, n = ntiles*b,
+		times = 0, failures = 0, successes = 0;
+
 	float 	totaltime = 0;
 
-	ticks tick, tock;
+	ticks 	tick, tock;
 
-	pthread_t threads[NUMTHREADS];
-	pthread_attr_t tattr;
+	matCPU 	= newMatrix(m, n);
+	matData = newMatrix(m, n);
+	matTau 	= newMatrix(m, n);
+	matComp = newMatrix(m, n);
 
-	pthread_cond_t tCond = PTHREAD_COND_INITIALIZER;
-	pthread_mutex_t tMutex = PTHREAD_MUTEX_INITIALIZER, sigMutex = PTHREAD_MUTEX_INITIALIZER;
-	int tCondMet = 0;
-
-	struct ThreadInfo threadInfs[NUMTHREADS];
-	
-	Task *taskGrid;
-	float* workingVects[NUMTHREADS];
-	
-	matA = newMatrix(ma, na);
-	matComp = newMatrix(ma, na);
-	matData = newMatrix(ma, na);
-	matTau = newMatrix(ma, na);
-
-	for(i = 0; i < NUMTHREADS; i ++)//fill items for every task
-	{
-		workingVects[i] = newMatrix(2*b,1);//single vector per thread, allocated here
-		threadInfs[i].mat = matA;
-		threadInfs[i].tau = matTau;
-		threadInfs[i].wspace = workingVects[i];
-		threadInfs[i].ldm = ma;
-		threadInfs[i].b = b;
-		threadInfs[i].getTaskMutex = &tMutex;
-		threadInfs[i].newTasksCond = &tCond;
-		threadInfs[i].condMet = &tCondMet;
-		threadInfs[i].taskGrid = taskGrid;
-		threadInfs[i].taskM = p;
-		threadInfs[i].taskN = q;
-	}
-
-	pthread_attr_init(&tattr);
-	pthread_attr_setdetachstate(&tattr, PTHREAD_CREATE_JOINABLE);
-	
 	srand(5);
-	initMatrix(matA, ma, na, RANDZO);
-	initMatrix(matTau, na, na, ZERO);
 
-	copyMatrix(matA, ma, na, matData);
+	initMatrix(matData, m, n, RANDZO);
+	initMatrix(matTau, n, n, ZERO);
 
-	//printf("A:\n");
-	printMatrix(matA, 1, 1, 1);
-
-	taskGrid = initScheduler(p, q);
-	for(i = 0; i < NUMTHREADS; i ++)
-	{
-		threadInfs[i].taskGrid = taskGrid;
-	}
-
-	tick = getticks();
-	t = 0;
-	while(t < NUMTHREADS)
-	{
-		rc = pthread_create(&threads[t], &tattr, pthr_doTasks, (void*) &threadInfs[t]);
-		t ++;
-	}
-
-	tCondMet = 1;
-
-	t = 0;
-
-	while(t < NUMTHREADS)
-	{
-		rc = pthread_join(threads[t], NULL);
-		t ++;
-	}
-
-	//cudaQRFull(matA, ma, na);
-	tock = getticks();
+	copyMatrix(matData, m, n, matCPU);
 	
-	printf("tiled CPU in %5.2f ms\n", (float)(tock - tick)/3.8e9*1000);
-	tCondMet = 0;
-	free(taskGrid);
+	taskQRP_threads	(matData, matCPU, matTau,
+			m, n, b,
+			1);
+	
+	/*printf("00 =\n");printMatrix(matData, b, b, m);
+	printf("V = \n");printMatrix(matCPU, b, b, m);
+	printf("T = \n");printMatrix(matTau, b, b, m);*/
 
 	while( times ++ < numtests )
 	{
-		copyMatrix(matData, ma, na, matComp);
-		tick = getticks();
-		//cudaQRFull(matComp, ma, na);
-		cudaQRTask(matComp, ma, na);
-		tock = getticks();
-		//printf("tiled GPU in %5.2f ms\n", (float)(tock - tick)/3.8e9*1000);
-		totaltime += (tock - tick)/3.8e9*1000;
-		//printMatrix(matA, ma, 1, ma);
+		copyMatrix(matData, m, n, matComp);
+		cudaQRTask(matComp, m, n);
+		//cudaQRFull(matComp, m, n);
 
-		if( ! checkEqual(matA, matComp, ma, na, ma) )
+		if( ! checkEqual(matComp, matCPU, m, n, m) )
 		{
-			printf("Failure %5.2f.\n", (float)(tock - tick)/3.8e9*1000);
+			printf("Failure.\n");
 			failures ++;
 		}
 		else
@@ -156,14 +93,114 @@ void blockQR( int numtests, int mtiles, int ntiles )
 	}
 
 	printf("Done.\n%d failures and %d successes out of %d.\n"\
-		"Average time to process on GPU: %5.2f ms.\n", failures, successes, numtests, totaltime / numtests);
-	deleteMatrix(matA);
+		, failures, successes, numtests);
+
+	deleteMatrix(matCPU);
 	deleteMatrix(matComp);
 	deleteMatrix(matData);
-	for(i = 0; i < NUMTHREADS; i ++)
-		deleteMatrix(workingVects[i]);
-	pthread_attr_destroy(&tattr);
+	deleteMatrix(matTau);
 }
+
+/**
+ * Performs a tiled task based QR decomposition on the mxn matrix matData,
+ * returning the result into matResult.
+ *
+ * \param matData The mxn matrix containing the input values for the decomposition.
+ * \param matResult The mxn matrix to return the result into.
+ * \param tau The mxn matrix representing the tau matrix returned by the transformation.
+ * \param m The number of rows in the matrices.
+ * \param n The number of columns in the matrices.
+ * \param b The block size in the matrices. Assumed to be some factor of m and n.
+ * \param useWY A boolean int representing whether the function should use the
+ *              WY representation to perform the computation or not.
+ */
+void taskQRP_threads	(float* matData, float* matResult,
+			float* tau,
+			int m, int n, int b,
+			int useWY)
+{
+	ticks 			tick, tock;
+
+	pthread_t 		threads[NUMTHREADS];
+	pthread_attr_t 		tattr;
+
+	pthread_cond_t 		tCond = PTHREAD_COND_INITIALIZER;
+	pthread_mutex_t 	tMutex = PTHREAD_MUTEX_INITIALIZER;
+
+	struct 	ThreadInfo 	threadInfs[NUMTHREADS];
+	
+	Task 			*taskGrid;
+
+	int 			p = m / b, q = n / b,
+				tCondMet = 0,
+				i, t;
+	
+	/* Copy the data into the destination, to perform the decomposition in place. */
+	copyMatrix(matData, m, n, matResult);
+
+	/* Initialise the task scheduler. */
+	taskGrid = initScheduler(p, q);
+
+	/* Fill the structs for the threads with all the per-thread resources. */
+	for(i = 0; i < NUMTHREADS; i ++)
+	{
+		threadInfs[i].wspace[0] = newMatrix(2*b,1);
+		threadInfs[i].wspace[1] = newMatrix(2*b,1);
+		threadInfs[i].mat = matResult;
+		threadInfs[i].useWY = useWY;
+		threadInfs[i].tau = tau;
+		threadInfs[i].ldm = m;
+		threadInfs[i].b = b;
+		threadInfs[i].getTaskMutex = &tMutex;
+		threadInfs[i].newTasksCond = &tCond;
+		threadInfs[i].condMet = &tCondMet;
+		threadInfs[i].taskGrid = taskGrid;
+		threadInfs[i].taskM = p;
+		threadInfs[i].taskN = q;
+		threadInfs[i].taskGrid = taskGrid;
+	}
+
+	/* Fix tattr such that created threads can be joined later. */
+	pthread_attr_init(&tattr);
+	pthread_attr_setdetachstate(&tattr, PTHREAD_CREATE_JOINABLE);
+	
+	/* Get timing start info. */
+	tick = getticks();
+
+	/* Initialise the counter to start threads. */
+	t = 0;
+	while(t < NUMTHREADS)
+	{
+		pthread_create( &threads[t], &tattr, pthr_doTasks, (void*) &threadInfs[t] );
+		t ++;
+	}
+
+	/* Set the starting flag. */
+	tCondMet = 1;
+
+	/* Loop through the created threads, finishing execution. */
+	t = 0;
+	while(t < NUMTHREADS)
+	{
+		pthread_join(threads[t], NULL);
+		t ++;
+	}
+
+	/* Get finishing timing data & register result. */
+	tock = getticks();
+	printf("tiled CPU in %5.2f ms\n", (float)(tock - tick)/3.8e9*1000);
+
+	/* Clean up per-thread working vector. */	
+	for(i = 0; i < NUMTHREADS; i ++)
+	{
+		deleteMatrix( threadInfs[i].wspace[0] );
+		deleteMatrix( threadInfs[i].wspace[1] );
+	}
+
+	/* Clean up the joinable attribute. */
+	pthread_attr_destroy( &tattr );
+}
+
 /**
  * \brief Fetches tasks from the task grid until a valid task is returned or there are no more tasks possible
  * \param mutex The mutex locking access to the task grid
@@ -241,8 +278,8 @@ void pthr_doneATask	(pthread_mutex_t* mutex,
 void* pthr_doTasks(void* threadinfoptr)
 {
 	int nextTask;
-	float *matData, *matTau, *workingVect;
-	int ldm, b, taskM, taskN;
+	float *matData, *matTau, **workingVect;
+	int ldm, b, taskM, taskN, useWY;
 	Task* taskGrid, toDoTask;
 
 	int *condMet;
@@ -270,6 +307,8 @@ void* pthr_doTasks(void* threadinfoptr)
 	tCond = localThreadInf.newTasksCond;
 	condMet = localThreadInf.condMet;
 
+	useWY = localThreadInf.useWY;
+
 	//while there are tasks available
 	while(nextTask != TASK_DONE)
 	{
@@ -279,7 +318,7 @@ void* pthr_doTasks(void* threadinfoptr)
 		//execute task if not TASK_NONE or TASK_DONE
 		if(nextTask == TASK_AVAIL)
 		{
-			doATask(toDoTask, matData, matTau, b, ldm, workingVect);
+			doATask(toDoTask, matData, matTau, b, ldm, workingVect, useWY);
 
 			//finish task
 			pthr_doneATask(tMutex, tCond, condMet, taskGrid, taskM, taskN, toDoTask);
@@ -311,7 +350,8 @@ void doATask	(Task t,
 		float* mat,
 		float* tau,
 		int b, int ldm,
-		float* colVect)
+		float** colVect,
+		int useWY)
 {
 	float *blockV, *blockA, *blockB, *blockTau;
 
@@ -323,13 +363,10 @@ void doATask	(Task t,
 			blockV = mat + CO((t.k*b),(t.k*b),ldm);
 			blockTau = tau + CO((t.k*b),(t.k*b),ldm);
 			
-			#ifdef USE_WY
-				qRSingleBlock_WY(blockV, blockTau, b, b, ldm, colVect);
-			#endif
-			#ifndef USE_WY
-				qRSingleBlock(blockV, b, b, ldm, colVect);
-			#endif
-			//cudaQRS(blockV, ldm);
+			if( useWY )
+				qRSingleBlock_WY(blockV, blockTau, b, b, ldm, colVect[0]);
+			else
+				qRSingleBlock(blockV, b, b, ldm, colVect[0]);
 			//printf("qr %d,%d\n", t.k, t.k);
 			break;
 		}
@@ -337,8 +374,12 @@ void doATask	(Task t,
 		{
 			blockV = mat + CO((t.k*b),(t.k*b),ldm);
 			blockA = mat + CO((t.k*b),(t.m*b),ldm);
-			applySingleBlock(blockA, b, b, ldm, blockV);
-			//cudaSAPP(blockV, blockA, ldm);
+			blockTau= tau + CO((t.k*b),(t.k*b),ldm);
+
+			if( useWY )
+				applySingleBlock_WY( blockA, blockV, blockTau, b, b, ldm, colVect );
+			else
+				applySingleBlock(blockA, b, b, ldm, blockV);
 			//printf("sapp %d,%d %d,%d\n", t.k, t.k, t.k, t.m);
 			break;
 		}
@@ -346,8 +387,12 @@ void doATask	(Task t,
 		{
 			blockA = mat + CO((t.k*b),(t.k*b),ldm);
 			blockB = mat + CO((t.l*b),(t.k*b),ldm);
-			qRDoubleBlock(blockA, b, b, blockB, b, ldm, colVect);
-			//cudaQRD(blockA, blockB, ldm);
+			blockTau = tau + CO((t.l*b),(t.k*b),ldm);
+
+			if( useWY )
+				qRDoubleBlock_WY(blockA, blockB, blockTau, b, b, b, ldm, colVect[0]);
+			else
+				qRDoubleBlock(blockA, b, b, blockB, b, ldm, colVect[0]);
 			//printf("qrd %d,%d %d,%d\n", t.k, t.k, t.l, t.k);
 			break;
 		}
@@ -356,49 +401,58 @@ void doATask	(Task t,
 			blockV = mat + CO((t.l*b),(t.k*b),ldm);
 			blockA = mat + CO((t.k*b),(t.m*b),ldm);
 			blockB = mat + CO((t.l*b),(t.m*b),ldm);
-			applyDoubleBlock(blockA, b, blockB, b, b, ldm, blockV);
-			//cudaDAPP(blockV, blockA, blockB, ldm);
+			blockTau = tau + CO((t.l*b),(t.k*b),ldm);
+
+			if( useWY )
+				applyDoubleBlock_WY(	blockV,
+							blockA, blockB,
+							blockTau,
+							b, b, ldm);
+			else
+				applyDoubleBlock(blockA, b, blockB, b, b, ldm, blockV);
 			//printf("dapp %d,%d %d,%d %d,%d\n", t.l, t.k, t.k, t.m, t.l, t.m);
 			break;
 		}
 	}
 }
 
-void updatekthSingleWY	(float* block,
+void updatekthSingleWY	(float* blockV,
 			float* tauBlock,
 			float beta,
-			int j,
+			int k,
 			int m, int n, int ldm,
 			float* w)
 {
-	int i, k;
+	int l, i;
 	/* Householder vector is at [0..1,block[j+1:m]] */
 	
-	/* Compute b = V_(j,:) */
-	for(i = 0; i < j - 1; i ++)
-		w[i] = block[(i*ldm) + j];
+	/* Compute b = V_(k,:) */
+	//for(i = 0; i <= k - 1; i ++)
+	//{
+	//	w[i] = blockV[(i*ldm) + k];
+	//}
 	
 	/* Compute b = V^T*V_j */
-	for(k = j + 1; k < m; k ++)
-	{
-		for(i = 0; i < j - 1; i ++)
-			w[i] += block[(i*ldm) + k] * block[(j*ldm) + k];
-	}
-	
+	//for(l = k+1; l < m; l ++)
+	//{
+	//	for(i = 0; i <= k - 1; i ++)
+	//		w[i] += blockV[(k*ldm) + l] * blockV[(i*ldm) + l];
+	//}
+
 	/* Compute T_j = T*w */
-	for(k = 0; k < j - 1; k ++)
-	{
-		for(i = 0; i < k + 1; i ++)
-			tauBlock[(j*ldm) + i] += w[k] * tauBlock[(k*ldm) + i];
-	}
+	//for(l = 0; l <= k - 1; l ++)
+	//{
+	//	for(i = 0; i <= l; i ++)
+	//		tauBlock[(k*ldm) + i] += w[l] * tauBlock[(l*ldm) + i];
+	//}
 	
 	/* Compute T_j = beta * T_j */
-	for(i = 0; i < j - 1; i ++)
-		tauBlock[(j*ldm) + i] *= -beta;
+	//for(i = 0; i <= k - 1; i ++)
+	//	tauBlock[(k*ldm) + i] *= (-beta);
 
 	/* Insert beta on the diagonal of Tau */
-	tauBlock[(j*ldm) + j] = beta;
-}	
+	tauBlock[(k*ldm) + k] = beta;
+}
 
 void updateSingleQ_WY	(float* block,
 			float* tauBlock,
@@ -470,6 +524,213 @@ void qRSingleBlock_WY	(float* block,
 	}
 }
 
+void applySingleBlock_WY(float* block,
+			float* blockV,
+			float* tauBlock,
+			int m, int n, int ldm,
+			float** w)
+{
+	//applySingleBlock( block, m, n, ldm, blockV );
+	/* 	Perform the transformation block = block - blockV*(tauBlock*(blockV^T*block)) 
+	 	Equivalent to B = B - V(T(V^TB))
+		Noting that T is upper triangular, and V is unit lower triangular. */
+	int i, j, k;
+
+	float tau, beta;
+
+	//for(j = 0; j < n; j ++)
+	//{
+		/* Zero temporary storage. */
+	//	for(i = 0; i < m; i ++)
+	//	{
+	//		w[0][i] = 0;
+	//		w[1][i] = 0;
+	//	}
+
+		/* Compute w[0] = V^T*b_j */
+	//	for(k = 0; k < m; k ++)
+	//	{
+			/* Compute up to diagonal of V (where i<k). */
+	//		for(i = 0; i < k; i ++)
+	//		{
+	//			w[0][i] += blockV[(i*ldm) + k] * block[(j*ldm) + k];
+	//		}
+
+			/* compute where i == k, and V_kk = 1 */
+	//		w[0][k] += block[(j*ldm) + k];
+	//	}
+
+		/* Compute w[1] = T*w[0] */
+	//	for(k = 0; k < m; k ++)
+	//	{
+			/* Compute above and on diagonal of T. Where i <= k. */
+	//		for(i = 0; i <= k; i ++)
+	//		{
+	//			w[1][i] += tauBlock[(k*ldm) + i] * w[0][k];
+	//		}
+	//	}
+	
+		/* Compute b_j = b_j - V*w[1] */
+	//	for(k = 0; k < m; k ++)
+	//	{
+			/* V is one on diagonal. */
+	//		block[(j*ldm) +k] -= w[1][k];
+			
+			/* Compute below diagonal of V. */
+	//		for(i = k + 1; i < m; i ++)
+	//		{
+	//			block[(j*ldm) + i] -= blockV[(k*ldm) + i] * w[1][k];
+	//		}
+	//	}
+	//}
+
+	/* For each column of the block. */
+	for(j = 0; j < n; j ++)
+	{
+		/* Apply successive reflectors with b_j - tau_k*v_k*v_k'b_j */
+		for(k = 0; k < n; k ++)
+		{
+			/* tau_k is at blockV(k,k) */
+			tau = tauBlock[(k*ldm) + k];
+	
+			/* Compute v_k'*b_j, with v_k,k = 1 implied */
+			beta = block[(j*ldm) + k];//*1.0
+
+			/* Rest of vector. */
+			for(i = k+1; i < m; i ++)
+				beta += blockV[(k*ldm) + i] * block[(j*ldm) + i];
+
+			beta *= tau;
+
+			/* Compute b_j = b_j - beta*v_k, again with an implied 1 at v_kk */
+			block[(j*ldm) + k] -= beta;/* *1.0 */
+			
+			/* Compute for rest of b_j */
+			for(i = k+1; i < m; i ++)
+				block[(j*ldm) + i] -= beta * blockV[(k*ldm) + i];
+		}
+	}
+}
+
+void updateDoubleQ_WY	(float* blockA,
+			float* blockB,
+			float* blockTau,
+			int k, int ma, int mb, int n,
+			int ldm,
+			float* hhVector)//bottom, essential part.
+{
+	int i, j, m = ma + mb;
+
+	float tau = 1.0, beta;
+
+	/* Compute tau = 2/v'v */
+	for(i = 0; i < mb; i ++)
+		tau += hhVector[i] * hhVector[i];
+
+	tau = 2/tau;
+
+	for(j = k; j < n; j ++)
+	{
+		/* Compute v'*b_j */
+		beta = blockA[(j*ldm) + k];
+
+		/* Then for lower half */
+		for(i = 0; i < mb; i ++)
+			beta += blockB[(j*ldm) + i] * hhVector[i];
+
+		beta *= tau;
+
+		/* Compute b_j = b_j - beta*v_k */
+		blockA[(j*ldm) + k] -= beta;
+		
+		for(i = 0; i < mb; i ++)
+			blockB[(j*ldm) + i] -= beta * hhVector[i];
+	}
+
+	/* Insert vector below diagonal. */
+	for(i = 0; i < mb; i ++)
+		blockB[(k*ldm) + i] = hhVector[i];
+
+	blockTau[(k*ldm) + k] = tau;
+}
+
+void qRDoubleBlock_WY	(float* blockA,
+			float* blockB,
+			float* blockTau,
+			int ma,
+			int mb,
+			int n,
+			int ldm,
+			float* hhVector)
+{
+	int k;
+	float* xVectA, *xVectB;
+	
+	xVectA = blockA;
+	xVectB = blockB;
+
+	for(k = 0; k < n; k++)
+	{
+		//vk = sign(x[1])||x||_2e1 + x
+		//vk = vk/vk[0]
+		calcvkDouble(xVectA[0], ma - k, xVectB, (ma + mb) - k, hhVector);//returns essential
+
+		//matA(k:ma,k:na) = matA(k:ma,k:na) - (2/(vk.T*vk))*vk*(vk.T*matA(k:ma,k:na)
+		//update both blocks, preserving the vectors already stored below the diagonal in the top block and treating them as if they were zeros.
+		updateDoubleQ_WY	(blockA, blockB,
+					blockTau,
+					k, ma, mb, n,
+					ldm,
+					hhVector + ma - k);
+
+		xVectA += ldm + 1;
+		xVectB += ldm;
+	}
+}
+
+void applyDoubleBlock_WY	(float* blockV,
+				float* blockA, float* blockB,
+				float* blockTau,
+				int b, int n, int ldm)
+{
+	int i, j, k;
+
+	float tau, beta;
+
+	/* Compute b_j = b_j - tau*v*v'*b_j for each column j of blocks A & B,
+	   and for each householder vector v of blockV */
+
+	/* For each column of B */
+	for(j = 0; j < n; j ++)
+	{
+		/* For each householder vector. */
+		for(k = 0; k < n; k ++)
+		{
+			/* tau = 2/v'v, computed earlier, stored in T(k,k). */
+			tau = blockTau[(k*ldm) + k];
+
+			/* Compute beta = v_k'b_j. */
+			/* v_k is >0 (=1) only at position k in top half. */
+			beta = blockA[(j*ldm) + k];
+
+			/* For lower portion of v_k, aligning with the lower block */
+			for(i = 0; i < b; i ++)
+				beta += blockB[(j*ldm) + i] * blockV[(k*ldm) + i];
+
+			beta *= tau;
+			
+			/* Compute b_j = b_j - beta * v */
+			/* v_k = 1 at (k) in top half again */
+			blockA[(j*ldm) + k] -= beta;
+
+			/* Apply to bottom block. */
+			for(i = 0; i < b; i ++)
+				blockB[(j*ldm) + i] -= beta * blockV[(k*ldm) + i];
+		}
+	}
+}
+			
+			
 /**
  * \brief Computes the QR decomposition of a single block within a matrix
  *
@@ -718,7 +979,6 @@ void updateDoubleQ	(float* matA,
  * 
  * \returns void
  */
-
 
 void updateDoubleQZeros	(float* matA,
 			int ma,
@@ -1069,7 +1329,7 @@ void printMatrix(float* mat, int m, int n, int ldm)
 			printf(" %2.3f", mat[CO(r,c,ldm)]);
 		}
 		if(r != m-1)
-			putchar('\n');
+			putchar(';');
 	}
 	printf("]\n");
 }
