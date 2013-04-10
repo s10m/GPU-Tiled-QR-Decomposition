@@ -1,4 +1,4 @@
-CUDA_MYFLAGS=-O3 -lineinfo -src-in-ptx -Xptxas="-v" -arch=sm_20 -use_fast_math
+CUDA_MYFLAGS=-O2 -lineinfo -src-in-ptx -Xptxas="-v" -arch=sm_20 -use_fast_math
 qr : obj/qrdecomp.o obj/gridscheduler.o obj/gpucalc.cu.o makefile
 	nvcc $(CUDA_MYFLAGS) obj/gpucalc.cu.o obj/qrdecomp.o obj/gridscheduler.o -lm -lpthread -o qr
 qr-nocuda : obj/qrdecomp.o obj/gridscheduler.o makefile

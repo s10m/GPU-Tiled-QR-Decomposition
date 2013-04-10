@@ -466,7 +466,7 @@ __device__ void completeATask	(volatile Task* taskGrid,
 	int k, j, p, q;
 	enum Type tType, tTypeNext;
 	
-	cuda_mutex_lock(&tgrid(0,0).mutex);
+	//cuda_mutex_lock(&tgrid(0,0).mutex);
 
 	p = t.l;
 	q = t.m;
@@ -560,7 +560,7 @@ __device__ void completeATask	(volatile Task* taskGrid,
 			break;
 		}
 	}
-	cuda_mutex_unlock(&tgrid(0,0).mutex);
+	//cuda_mutex_unlock(&tgrid(0,0).mutex);
 }
 
 //computes the sum of the elements of the size startN sumVector, storing the result in sumVector[0] in 5 cycles
@@ -672,7 +672,48 @@ __device__ void applyHH(volatile float blockCache[],//SHARED the 32*32 matrix bl
 		blockCache[TID + k*32] = hhVectorelem;//insert essential part of vector below diagonal in column k of block
 	
 	if(TID == 0)
-		matTau[(k*ldm) + k] = y;
+		matTau[k] = y;
+}
+
+__device__ void calcDoubleHHWY	(float topElem,
+				float lowElem,
+				int k,
+				volatile float blockCache[])
+{
+	/* Calculate v_k. */
+	int sign, i;
+
+	float 	topSum = 0,
+		lowSum = 0,
+		alpha;
+
+	__shared__ volatile float first;
+	
+	if(TID == k)
+		first = topElem;
+	
+	topSum = first * first;
+	/* Sum squares of V to compute norm, using column of BlockCache as working space. */
+	blockCache[TID + (k*32)] = lowElem * lowElem;
+	for(i = 0; i < 32; i ++)
+		lowSum += blockCache[i + (k*32)];
+	
+	alpha = sqrt(topSum + lowSum);
+	sign = first >= 0 ? 1 : -1;
+
+	if(alpha != 0.0)
+	{
+		/* Zeroth element is = first + sign*norm */
+		alpha = first + sign * alpha;
+		alpha = 1.0/alpha;
+	}
+	else
+		alpha = 1.0;
+
+	//topElem *= alpha;
+	lowElem *= alpha;
+	
+	blockCache[TID + (k*32)] = lowElem;
 }
 
 __device__ void calcDoubleHH	(float topElem,//element of top block
@@ -803,7 +844,7 @@ __device__ void applyDoubleHH	(float topRow[],
 	}
 	
 	if(TID == 0)
-		blockTau[(k*ldm) + k] = y;
+		blockTau[k] = y;
 	
 	lowRow[k] = hhVectorElem;
 }
@@ -867,7 +908,108 @@ __global__ void doQRS( float* matrix, float* tau, int ldm)
 			blockCache);
 }
 
-__device__ void device_doQRD	( float* blockA,  float* blockB, float* blockTau,
+__device__ void applyOneHHVectD	(float* topElem,
+				float* lowElem,
+				int k,
+				volatile float tau[],
+				volatile float blockCache[])
+{
+	float alpha;
+	__shared__ volatile float workV[32];
+
+	/* Compute alpha = sum */
+	if(TID == k)
+		workV[TID] = *topElem;
+	if(TID != k)
+		workV[TID] = 0.0;
+
+	workV[TID] += *lowElem * blockCache[TID + (k*32)];
+
+	reduceSum(workV, 32);
+	
+	alpha = workV[0];
+
+	/* Multiply by tau */
+	alpha *= tau[k];
+
+	/* Compute alpha *= a_tid,j*v_tid,k */
+	if(TID == k)
+		*topElem -= alpha;
+			
+	/* For lower element. */
+	alpha *= blockCache[TID + (k*32)];
+	*lowElem -= alpha;
+}
+
+__device__ void device_doQRDW	(float* blockA, float* blockB, float* blockTau,
+				int ldm,
+				volatile float tauVect[],
+				volatile float blockCache[])//32*32 temp space
+{
+	/* Idea: for each column j of (AB)^T,
+		apply HH vectors 0...j-1,
+		compute new HH vector for column j,
+		store essential part in blockCache 
+
+	Uses one block cache, one vector storage. */
+	int j, k, i;
+
+	float 	topElem,
+		lowElem,
+		tau;
+
+	for(j = 0; j < 32; j ++)
+	{
+		/* Apply previous HH vectors to column j. */
+		if(TID <= j)
+			topElem = blockA[TID + (j*ldm)];
+		if(TID > j)
+			topElem = 0;
+
+		lowElem = blockB[TID + (j*ldm)];
+
+		for(k = 0; k < j; k ++)
+		{
+			/* Compute b_tid,j = b_tid,j - tau*vv'*b_tid,j */
+			applyOneHHVectD	(&topElem, &lowElem,
+					k,
+					tauVect,
+					blockCache);
+		}
+
+		calcDoubleHHWY	(topElem,
+				lowElem,
+				j,
+				blockCache);
+
+		/* Compute new tau = 2/v'v */
+		tau = 1.0;
+		for(i = 0; i < 32; i ++)
+			tau += blockCache[i + (j*32)] * blockCache[i + (j*32)];
+		tau = 2.0/tau;
+		
+		if(TID == j)
+			tauVect[j] = tau;
+
+		/* Apply new vector to column. */
+		applyOneHHVectD	(&topElem, &lowElem,
+				j,
+				tauVect,
+				blockCache);
+
+		/* Write back */
+		if(TID <= j)
+			blockA[TID + (j*ldm)] = topElem;
+	}
+
+	/* Write back lower block, containing householder Vectors. */
+	for(j = 0; j < 32; j ++)
+		blockB[TID + (j*ldm)] = blockCache[TID + (j*32)];
+	
+	blockTau[TID] = tauVect[TID];
+}
+
+__device__ void device_doQRD	(float* blockA,  float* blockB, float* blockTau,
 				int ldm,
 				volatile float workingVector[],
 				float topRow[],
@@ -934,56 +1076,48 @@ __device__ void device_doSAPP	(float* blockV,
 				volatile float workingVector[],
 				volatile float blockCache[])
 {
-	__shared__ volatile float currentTau;
+	int 	j, k;
 
-	float	beta,
-		belem,
-		tauElem;
-
-	int j, k, refMat, refCache;
-
-	refMat = TID;
-	refCache = TID;
+	__shared__ volatile float tau[32];
 	
+	float 	alpha,
+		belem;
+	
+	/* Load tau Vector */
+	tau[TID] = blockTau[TID];
+	
+	/* Load Vectors */
+	//for(j = 0; j < 32; j ++) if(TID > j) blockCache[TID + (j*32)] = blockV[TID + (j*ldm)];
+
 	for(j = 0; j < 32; j ++)
 	{
 		if(TID < j)
-			blockCache[refCache] = 0.0;
-		else if(TID == j)//on diagonal
-		{
-			blockCache[refCache] = 1.0;
-			tauElem = blockTau[refMat];
-		}
-		else if(TID > j)
-			blockCache[refCache] = blockV[refMat];
-
-		refMat += ldm;
-		refCache += 32;
+			blockCache[TID + (j*32)] = 0.0;
+		if(TID == j)
+			blockCache[TID + (j*32)] = 1.0;
 	}
-
-	/* For each column in B. */
+	
+	/* Compute b_j -= tau*v*v'b_j, for all vectors in blockCached V */
 	for(j = 0; j < 32; j ++)
 	{
 		belem = blockA[TID + (j*ldm)];
-
-		/* For each vector in V. */
+		/* For each vector in block of vectors. */
 		for(k = 0; k < 32; k ++)
 		{
-			if(TID == k)//load the kth tau
-				currentTau = tauElem;
-
-			/* Compute beta = v'*b_j */
-			workingVector[TID] = belem * blockCache[TID+(k*32)];
+			/* Compute alpha = v'*b_j */
+			workingVector[TID] = blockCache[TID + (k*32)] * belem;
 			reduceSum(workingVector, 32);
-			beta = currentTau * workingVector[0];
+			alpha = workingVector[0];
 
-			/* Compute belem = belem - beta*v_k */
-			belem -= beta * blockCache[TID+(k*32)];
+			/* Compute alpha = tau * v_tid * alpha */
+			alpha *= tau[k];
+			alpha *= blockCache[TID + (k*32)];
+			
+			/* Compute belem -= alpha */
+			belem -= alpha;
 		}
-
 		blockA[TID + (j*ldm)] = belem;
 	}
-	__threadfence();
 }
 
 __global__ void doSAPP	(float* blockV,
@@ -1006,8 +1140,7 @@ __device__ void device_doDAPP	(float* blockV,
 				float* blockTau,
 				int ldm,
 				volatile float workingVector[],
-				volatile float blockCache[],
-				float aRow[], float bRow[])
+				volatile float blockCache[])
 {
 	__shared__ volatile float currentTau;
 
@@ -1019,14 +1152,12 @@ __device__ void device_doDAPP	(float* blockV,
 	
 	refMat = TID;
 	refCache = TID;
+	tauelem = blockTau[TID];
 
 	/* Load the essential HH vector block into shared cache. */
 	for(j = 0; j < 32; j ++)
 	{
 		blockCache[refCache] = blockV[refMat];
-
-		if(TID == j)// on diagonal
-			tauelem = blockTau[refMat];
 
 		refMat += ldm;
 		refCache += 32;
@@ -1069,7 +1200,6 @@ __device__ void device_doDAPP	(float* blockV,
 		blockA[TID + (j*ldm)] = aelem;
 		blockB[TID + (j*ldm)] = belem;
 	}
-	__threadfence();
 
 	/*float 	vElem,
 		scal,
@@ -1154,11 +1284,13 @@ __global__ void doDAPP	(float* blockV,
 inline __device__ void retrieveTask( Task* ret, volatile Task* t )
 {
 	//__threadfence();
+	int l;
 
 	//read and return value
-	t->taskStatus = DOING;
 	//printf("tasktzp: %p: %d\n", &ret->l, ret->l);
-	ret->l = t->l;
+	l = t->l;
+	
+	ret->l = l;//t->l;
 	ret->m = t->m;
 	ret->k = t->k;
 	ret->taskStatus = DOING;
@@ -1169,10 +1301,11 @@ __device__ int executeTask	(Task t,
 				float* mat, float* matTau,
 				int ldm, int n,
 				volatile float workingVector[],
-				volatile float blockCache[],
-				float vElems[], float topRow[], float lowRow[])
+				volatile float blockCache[])
 {
-	 float *blockV, *blockA, *blockB, *blockTau;
+	float *blockV, *blockA, *blockB, *blockTau;
+	float blah;
+	int j = 10;
 
 	//switch based on the type of task we've got
 	switch(t.taskType)
@@ -1181,8 +1314,7 @@ __device__ int executeTask	(Task t,
 		{
 			blockV = mat + CO(t.k*32,t.k*32,ldm);
 			blockTau = matTau + CO(t.k*32,t.k*32,ldm);
-			device_doQRS	( blockV, blockTau,
-					ldm,
+			device_doQRS	( blockV, blockTau, ldm,
 					workingVector, blockCache );
 //			if(TID == 0)printf("%d: QRS at %d,%d\n", blockIdx.x, t.k, t.k);
 			break;
@@ -1192,9 +1324,7 @@ __device__ int executeTask	(Task t,
 			blockV = mat + CO(t.k*32,t.k*32,ldm);
 			blockA = mat + CO(t.k*32,t.m*32,ldm);
 			blockTau = matTau + CO(t.k*32,t.k*32,ldm);
-			device_doSAPP	( blockV, blockA, blockTau,
-					ldm,
-					workingVector, blockCache );
+			device_doSAPP	( blockV, blockA, blockTau, ldm, workingVector, blockCache );
 //			if(TID == 0)printf("%d: SAPP from %d,%d to %d,%d\n", blockIdx.x, t.k, t.k, t.k, t.m);
 			break;
 		}
@@ -1203,9 +1333,7 @@ __device__ int executeTask	(Task t,
 			blockA = mat + CO(t.k*32,t.k*32,ldm);
 			blockB = mat + CO(t.l*32,t.k*32,ldm);
 			blockTau = matTau + CO(t.l*32,t.k*32,ldm);
-			device_doQRD	( blockA, blockB, blockTau,
-					ldm,
-					workingVector, topRow, lowRow );
+			device_doQRDW	( blockA, blockB, blockTau, ldm, workingVector, blockCache );
 //			if(TID == 0)printf("%d: QRD on %d,%d; %d,%d\n", blockIdx.x, t.k, t.k, t.l, t.k);
 			break;
 		}
@@ -1215,12 +1343,13 @@ __device__ int executeTask	(Task t,
 			blockA = mat + CO(t.k*32,t.m*32,ldm);
 			blockB = mat + CO(t.l*32,t.m*32,ldm);
 			blockTau = matTau + CO(t.l*32,t.k*32,ldm);
-			device_doDAPP	(blockV, blockA, blockB, blockTau, ldm,
-					workingVector, blockCache, topRow, lowRow );
+			device_doDAPP	(blockV, blockA, blockB, blockTau, ldm,	workingVector, blockCache);
 //			if(TID == 0)printf("%d: DAPP from %d,%d to %d,%d; %d,%d\n", blockIdx.x, t.l, t.k, t.k, t.m, t.l, t.m);
 			break;
 		}
 	}
+	for(j = 0; j < 32; j ++)
+		blockCache[TID + (j*32)] = 0.0;
 
 	return 1;
 }
@@ -1235,10 +1364,6 @@ __global__ void taskKernel	(float* matrix,
 	__shared__ volatile float workVector[64];
 	__shared__ volatile float blockCache[32*32];
 	
-	float 	vElems[32],
-		topRow[32],
-		lowRow[32];
-
 	int taskid;
 	Task tasktz;
 	__shared__ Task task;
@@ -1264,16 +1389,16 @@ __global__ void taskKernel	(float* matrix,
 		/* get the specifics of this task from the main task structure */
 		if( TID == 0 )
 		{
-			retrieveTask( &tasktz, taskGrid + taskid );
-			task = tasktz;
+			task.l = taskGrid[taskid].l;
+			task.m = taskGrid[taskid].m;
+			task.k = taskGrid[taskid].k;
+			task.taskType = taskGrid[taskid].taskType;
 		}
 
 		/* perform the activity specified by the task t */
 		executeTask	(task, matrix, matTau, m, n,
 				workVector,
-				blockCache,
-				vElems,
-				topRow, lowRow);
+				blockCache);
 
 		/* register task as finished in the task structure 
 		At the same time, insert each newly activated task into the cuda queue */
@@ -1311,7 +1436,7 @@ int calcTotalTasks(int m, int n)
 extern "C"
 void cudaQRTask(float* mat, int m, int n)
 {
-	int totalTasks, p = m/32, q = n/32, queuelen = p * q;
+	int totalTasks, p = m/32, q = n/32, queuelen = p * q + 1;
 	volatile int *dev_data;
 	//initialise task structure on GPU
 	volatile Task* dev_taskGrid;
@@ -1360,7 +1485,7 @@ void cudaQRTask(float* mat, int m, int n)
 	
 	cudaEventRecord(start,0);
 
-	taskKernel<<<128 < p*q ? 128 : p*q,32>>>( 	dev_m, dev_tau,
+	taskKernel<<<p*q > 128 ? 128 : p*q,32>>>( 	dev_m, dev_tau,
 							m, n, totalTasks, dev_taskGrid, p, q );
 
 	cudaEventRecord(stop,0);

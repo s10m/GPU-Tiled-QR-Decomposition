@@ -79,6 +79,8 @@ void tiledQR( int numtests, int mtiles, int ntiles )
 		copyMatrix(matData, m, n, matComp);
 		cudaQRTask(matComp, m, n);
 		//cudaQRFull(matComp, m, n);
+		//printMatrix(matComp + 32, 32, 1, m);
+		//printMatrix(matCPU + 32, 32, 1, m);
 
 		if( ! checkEqual(matComp, matCPU, m, n, m) )
 		{
@@ -95,6 +97,7 @@ void tiledQR( int numtests, int mtiles, int ntiles )
 	printf("Done.\n%d failures and %d successes out of %d.\n"\
 		, failures, successes, numtests);
 
+	cudaDeviceReset();
 	deleteMatrix(matCPU);
 	deleteMatrix(matComp);
 	deleteMatrix(matData);
