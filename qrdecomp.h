@@ -17,13 +17,14 @@ struct ThreadInfo
 };
 
 void tiledQR( int, int, int );
-void taskQRP_threads(float*, float*, float*, int, int, int, int);
+void taskQRP_threads(float*, float*, float*, int, int, int, int, int);
 
 float* newMatrix(int, int);
 void deleteMatrix(float*);
-void initMatrix(float*, int, int, int);
+
+void initMatrix(float*, int, int, int, int);
 void printMatrix(float*, int, int, int);
-void copyMatrix(float*, int, int, float*);
+void copyMatrix(float*, int, int, int, float*);
 int checkEqual(float*, float*, int, int, int);
 
 void doATask(Task, float*, float*, int, int, float**, int);

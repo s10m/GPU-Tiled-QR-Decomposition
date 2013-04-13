@@ -47,8 +47,9 @@ void tiledQR( int numtests, int mtiles, int ntiles )
 {
 	float* 	matCPU = NULL, *matComp = NULL, *matData = NULL, *matTau = NULL;
 
-	int 	b = 32, m = mtiles*b, n = ntiles*b,
-		times = 0, failures = 0, successes = 0;
+	int 	b = 32, m = mtiles*b, n = ntiles*b, ldm = m,
+		times = 0, failures = 0, successes = 0,
+		currentM;
 
 	float 	totaltime = 0;
 
@@ -61,43 +62,48 @@ void tiledQR( int numtests, int mtiles, int ntiles )
 
 	srand(5);
 
-	initMatrix(matData, m, n, RANDZO);
-	initMatrix(matTau, n, n, ZERO);
-
-	copyMatrix(matData, m, n, matCPU);
-	
-	taskQRP_threads	(matData, matCPU, matTau,
-			m, n, b,
-			1);
-	
-	/*printf("00 =\n");printMatrix(matData, b, b, m);
-	printf("V = \n");printMatrix(matCPU, b, b, m);
-	printf("T = \n");printMatrix(matTau, b, b, m);*/
-
-	while( times ++ < numtests )
+	for(currentM = mtiles; currentM <= mtiles; currentM ++)
 	{
-		copyMatrix(matData, m, n, matComp);
-		cudaQRTask(matComp, m, n);
-		//cudaQRFull(matComp, m, n);
-		//printMatrix(matComp + 32, 32, 1, m);
-		//printMatrix(matCPU + 32, 32, 1, m);
+		m = currentM * b;
+		n = currentM * b;
+		printf("\n(%d, %d):\n", m, n);
 
-		if( ! checkEqual(matComp, matCPU, m, n, m) )
+		initMatrix(matData, m, n, ldm, RANDZO);
+		initMatrix(matTau, n, n, ldm, ZERO);
+
+		copyMatrix(matData, m, n, ldm, matCPU);
+	
+		taskQRP_threads	(matData, matCPU, matTau,
+				m, n, b, ldm,
+				1);
+	
+		while( times ++ < numtests )
 		{
-			printf("Failure.\n");
-			failures ++;
+			copyMatrix(matData, m, n, ldm, matComp);
+			cudaQRTask(matComp, m, n, ldm);
+
+			if( ! checkEqual(matComp, matCPU, m, n, ldm) )
+			{
+				printf("Failure.\n");
+				failures ++;
+			}
+			else
+			{
+				//printf("Correct.\n");
+				successes ++;
+			}
+			putchar('\n');
 		}
-		else
-		{
-			printf("Success %d.\n", successes);
-			successes ++;
-		}
+		times = 0;
+
+		//printf("%d failures and %d successes out of %d.\n", failures, successes, numtests);
+		
+		failures = 0;
+		successes = 0;
+
+		cudaDeviceReset();
 	}
 
-	printf("Done.\n%d failures and %d successes out of %d.\n"\
-		, failures, successes, numtests);
-
-	cudaDeviceReset();
 	deleteMatrix(matCPU);
 	deleteMatrix(matComp);
 	deleteMatrix(matData);
@@ -119,7 +125,7 @@ void tiledQR( int numtests, int mtiles, int ntiles )
  */
 void taskQRP_threads	(float* matData, float* matResult,
 			float* tau,
-			int m, int n, int b,
+			int m, int n, int b, int ldm,
 			int useWY)
 {
 	ticks 			tick, tock;
@@ -139,7 +145,7 @@ void taskQRP_threads	(float* matData, float* matResult,
 				i, t;
 	
 	/* Copy the data into the destination, to perform the decomposition in place. */
-	copyMatrix(matData, m, n, matResult);
+	copyMatrix(matData, m, n, ldm, matResult);
 
 	/* Initialise the task scheduler. */
 	taskGrid = initScheduler(p, q);
@@ -152,7 +158,7 @@ void taskQRP_threads	(float* matData, float* matResult,
 		threadInfs[i].mat = matResult;
 		threadInfs[i].useWY = useWY;
 		threadInfs[i].tau = tau;
-		threadInfs[i].ldm = m;
+		threadInfs[i].ldm = ldm;
 		threadInfs[i].b = b;
 		threadInfs[i].getTaskMutex = &tMutex;
 		threadInfs[i].newTasksCond = &tCond;
@@ -1265,7 +1271,7 @@ float* multAB(float* matA, int ma, int na, int lda, float* matB, int nb, int ldb
 	float* matC = NULL;
 	int i, j, k;
 	matC = newMatrix(ma, nb);
-	initMatrix(matC, ma, nb, 0);
+	initMatrix(matC, ma, nb, ma, 0);
 
 	for(j = 0; j < nb; j++)
 	{
@@ -1281,12 +1287,13 @@ float* multAB(float* matA, int ma, int na, int lda, float* matB, int nb, int ldb
 	return matC;
 }
 
-void copyMatrix(float* mat, int m, int n, float* copymat)
+void copyMatrix(float* mat, int m, int n, int ldm, float* copymat)
 {
-	int i;
+	int i, j;
 
-	for(i = 0; i < m*n; i ++)
-		copymat[i] = mat[i];
+	for(j = 0; j < n; j ++)
+		for(i = 0; i < m; i ++)
+			copymat[i + (j*ldm)] = mat[i + (j*ldm)];
 }
 
 int checkEqual(float* matA, float* matB, int m, int n, int ldm)
@@ -1337,7 +1344,7 @@ void printMatrix(float* mat, int m, int n, int ldm)
 	printf("]\n");
 }
 
-void initMatrix(float* mat, int m, int n, int mode)
+void initMatrix(float* mat, int m, int n, int ldm, int mode)
 {
 	int r, c;
 
@@ -1346,13 +1353,13 @@ void initMatrix(float* mat, int m, int n, int mode)
 		for(r = 0; r < m; r++)
 		{
 			if(mode == ZERO)
-				mat[CO(r,c,m)] = 0;
+				mat[CO(r,c,ldm)] = 0;
 			else if(mode == RAND)
-				mat[CO(r,c,m)] = rand() % 32;
+				mat[CO(r,c,ldm)] = rand() % 32;
 			else if(mode == RANDZO)
-				mat[CO(r,c,m)] = ((float)(rand() % 33) - 16.0) / 16.0;
+				mat[CO(r,c,ldm)] = ((float)(rand() % 33) - 16.0) / 16.0;
 			else if(mode == EYE)
-				mat[CO(r,c,m)] = r == c ? 1 : 0;
+				mat[CO(r,c,ldm)] = r == c ? 1 : 0;
 		}
 	}
 }
