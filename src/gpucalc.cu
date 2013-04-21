@@ -17,7 +17,7 @@ extern "C" {
 #define TASK_DONE 2
 
 #define NBLOCKS 128
-#define WARPS 27
+#define WARPS 1 
 
 enum Type {QRS, SAPP, QRD, DAPP};
 enum Status {READY, DOING, DONE, NONE, NOTASKS};
@@ -488,16 +488,14 @@ __device__ void completeATask	(volatile Task* taskGrid,
 	int k, j, p, q;
 	enum Type tType, tTypeNext;
 	
-	//cuda_mutex_lock(&tgrid(0,0).mutex);
-
 	p = t.l;
 	q = t.m;
 	k = tgrid(p,q).k;
 	tType = getNextType(p, q, k);
-
-	//cuda_mutex_lock(&tgrid(p,q).mutex);
+	
+	cuda_mutex_lock(&tgrid(p,q).mutex);
 	tgrid(p,q).taskStatus = DONE;
-	//cuda_mutex_unlock(&tgrid(p,q).mutex);
+	cuda_mutex_unlock(&tgrid(p,q).mutex);
 	
 	switch(tType)
 	{
@@ -508,12 +506,8 @@ __device__ void completeATask	(volatile Task* taskGrid,
 
 			for(j = k + 1; j < N; j ++)//check along row
 			{
-				//cuda_mutex_lock(&tgrid(p,j).mutex);
-
 				if(candoSAPP(taskGrid, M, N, p, j, k))
 					makeTask(taskGrid, M, p, j, SAPP, READY, k);
-
-				//cuda_mutex_unlock(&tgrid(p,j).mutex);
 			}
 			break;
 		}
@@ -521,25 +515,20 @@ __device__ void completeATask	(volatile Task* taskGrid,
 		{
 			if(candoDAPP(taskGrid, M, N, p+1, q, k))//check one below
 				makeTask(taskGrid, M, p+1, q, DAPP, READY, k);
-
 			break;
 		}
 		case QRD:
 		{
 			if(inGrid(M, N, p+1,q))
 			{
-				//cuda_mutex_lock(&tgrid(p+1,q).mutex);
 				if(candoQRD(taskGrid, M, N, p+1, q, k))//check one below
 					makeTask(taskGrid, M, p+1, q, QRD, READY, k);
-				//cuda_mutex_unlock(&tgrid(p+1,q).mutex);
 			}
 
 			for(j = k + 1; j < N; j ++)
 			{
-				//cuda_mutex_lock(&tgrid(p-1,j).mutex);
 				if(candoDAPP(taskGrid, M, N, p, j, k))//check along row
 					makeTask(taskGrid, M, p, j, DAPP, READY, k);
-				//cuda_mutex_unlock(&tgrid(p-1,j).mutex);
 			}
 			
 			break;
@@ -560,14 +549,12 @@ __device__ void completeATask	(volatile Task* taskGrid,
 				{
 					if(candoSAPP(taskGrid, M, N, p, q, k + 1))
 						makeTask(taskGrid, M, p, q, SAPP, READY, k + 1);
-
 					break;
 				}
 				case QRD:
 				{
 					if(candoQRD(taskGrid, M, N, p, q, k + 1))
 						makeTask(taskGrid, M, p, q, QRD, READY, k + 1);
-
 					break;
 				}
 				case DAPP:
@@ -580,11 +567,10 @@ __device__ void completeATask	(volatile Task* taskGrid,
 
 			if(candoDAPP(taskGrid, M, N, p + 1, q, k))//check one below in current step
 				makeTask(taskGrid, M, p + 1, q, DAPP, READY, k);
-
+			
 			break;
 		}
 	}
-	//cuda_mutex_unlock(&tgrid(0,0).mutex);
 }
 
 //computes the sum of the elements of the size startN sumVector, storing the result in sumVector[0] in 5 cycles
@@ -1096,6 +1082,80 @@ __global__ void doQRD( float* blockA,  float* blockB, float* blockTau, int ldm)
 			rowB);
 }
 
+__device__ void device_MdoSAPP	(float* blockV,
+				float* blockA,
+				float* blockTau,
+				int ldm,
+				volatile float workingVector[],
+				volatile float blockCache[])
+{
+	int 	j, k, i,
+		tid = TID%32,
+		group = TID/32;
+
+	__shared__ volatile float tau[32];
+	__shared__ volatile float groupCache[WARPS*32];
+	
+	float 	alpha,
+		belem;
+	
+	volatile float *cacheCol = groupCache + (group*32);
+	
+	/* Load tau Vector */
+	if(TID < 32)
+		tau[TID] = blockTau[TID];
+	
+	/* ERROR HERE. READING VALUES CHANGES DATA IN BLOCKV. FUCK. */
+	/* Load Vectors */
+	for(j = 0; j < 32; j ++)//group; j < 32; j += WARPS)
+	{
+		if(tid > j)
+		{
+			blockCache[tid + (j*32)] = blockV[tid + (j*ldm)];
+		}
+	}
+
+	for(j = group; j < 32; j += WARPS)
+	{
+		if(tid < j)
+			blockCache[tid + (j*32)] = 0.0;
+		if(tid == j)
+			blockCache[tid + (j*32)] = 1.0;
+	}
+
+	__syncthreads();
+	
+	/* Compute b_j -= tau*v*v'b_j, for all vectors in blockCached V */
+	for(j = group; j < 32; j += WARPS)
+	{
+		belem = blockA[tid + (j*ldm)];
+		/* For each vector in block of vectors. */
+		for(k = 0; k < 32; k ++)
+		{
+			/* Compute alpha = v'*b_j */
+			cacheCol[tid] = blockCache[tid + (k*32)] * belem;
+
+			if(tid < 16)
+				cacheCol[tid] += cacheCol[tid+16];
+			if(tid < 8)
+				cacheCol[tid] += cacheCol[tid+8];
+			//alpha = cacheCol[7];
+			alpha = cacheCol[0];
+			for(i = 1; i < 8; i ++)
+				alpha += cacheCol[i];
+
+			/* Compute alpha = tau * v_tid * alpha */
+			alpha *= tau[k];
+			alpha *= blockCache[tid + (k*32)];
+			
+			/* Compute belem -= alpha */
+			belem -= alpha;
+		}
+		blockA[tid + (j*ldm)] = belem;
+		__syncthreads();
+	}
+	__threadfence();
+}
 __device__ void device_doSAPP	(float* blockV,
 				float* blockA,
 				float* blockTau,
@@ -1156,7 +1216,7 @@ __global__ void doSAPP	(float* blockV,
 	__shared__ volatile float workingVector[32];
 	__shared__ volatile float blockCache[32*32];
 	
-	device_doSAPP	(blockV, blockA, blockTau,
+	device_MdoSAPP	(blockV, blockA, blockTau,
 			ldm,
 			workingVector,
 			blockCache);
@@ -1174,39 +1234,26 @@ __device__ void applyOneHHVectDW(float* topElem,
 	volatile float *col;
 	int ind = tid + (k<<5);
 	int i;
-	int r = 16;
 
 	__shared__ volatile float workV[WARPS*32];
 	col = workV + (WARPS*group);
 
-	/* From HERE */
 	col[tid] = *topElem;
 	alpha = col[k];
 	/* Compute alpha = sum */
 	col[tid] = *lowElem * blockCache[ind];
 
-	/* to HERE is 10 */
-	
-	/* From HERE */
-	/*while(r > 4)
-	{
-		if(tid < r)
-			col[tid] += col[tid+r];
-
-		//__syncthreads();
-		r = r >> 1;
-	}*/
-
-	if(tid < 16)
+	/* Partial reduction to find half of v'*b_j */
+	/*if(tid < 16)
 		col[tid] += col[tid + 16];
 	if(tid < 8)
-		col[tid] += col[tid + 8];
+		col[tid] += col[tid + 8];*/
 
-	for(i = 0; i < 8; i ++)
+	/* Simple summation to find second half.
+           Combining the two turned out to be faster than either on their own. */
+	for(i = 0; i < 32; i ++)
 		alpha += col[i];
-	/* To HERE is 15 */
 
-	/* From HERE */
 	/* Multiply by tau */
 	alpha *= tau[k];
 
@@ -1217,7 +1264,6 @@ __device__ void applyOneHHVectDW(float* topElem,
 	/* For lower element. */
 	alpha *= blockCache[ind];
 	*lowElem -= alpha;
-	/* To HERE is 2 */
 }
 
 __device__ void device_MdoDAPP	(float* blockV,
@@ -1229,18 +1275,27 @@ __device__ void device_MdoDAPP	(float* blockV,
 				volatile float blockCache[])
 {
 	__shared__ volatile float tau[32];
+	__shared__ volatile float workV[WARPS*32];
 
-	float 	aelem, belem;
+	float 	aelem, belem,
+		alpha;
 
-	int j, k, refMat, refCache, tid, group;
+
+	int 	j, k, i,
+		tid, group,
+		refMat, refCache;
 	
+	__syncthreads();
 	tid = TID%32;
-	group = TID>>5;
-	
+	group = TID/32;
+
 	refMat = tid + group*ldm;
 	refCache = tid + group*32;
+
 	if(TID < 32)
 		tau[TID] = blockTau[TID];
+
+	__syncthreads();
 
 	/* Load the essential HH vector block into shared cache. */
 	for(j = group; j < 32; j += WARPS)
@@ -1251,37 +1306,56 @@ __device__ void device_MdoDAPP	(float* blockV,
 		refCache += WARPS*32;
 	}
 
-	//__syncthreads();
+	__syncthreads();
 
 	/* For each column of the result. */
-	refMat = tid + (group*ldm);
 	for(j = group; j < 32; j += WARPS)
 	{
-		/* Load the elements of the vector to process. */
-		aelem = blockA[refMat];
-		belem = blockB[refMat];
+		//if(tid == 0)	printf("%d: column %d.\n", group, j);
+		/* Load the elements of the column to process. */
+		aelem = blockA[tid + (j*ldm)];
+		belem = blockB[tid + (j*ldm)];
 		
-		/* For each vector in blockV. */
+		/* Compute and apply b_j = b_j - tau*vv'b_j
+			for each Householder vector 1..32. */
 		for(k = 0; k < 32; k ++)
 		{
-			/* Compute v'*b_j */
-			applyOneHHVectDW(&aelem,
-					&belem,
-					k,
-					tau,
-					blockCache,
-					tid,
-					group);
+			/* Load the kth element into all threads. */
+			workV[tid + (group*32)] = aelem;
 
-			//__syncthreads();
+			/* Store this as alpha. */
+			alpha = workV[k + (group*32)];
+	
+			/* Load components of v'b_j to sum. */
+			workV[tid + (group*32)] = belem * blockCache[tid + (k*32)];
+
+			if(tid < 16)
+				workV[tid + (group*32)] += workV[16 + tid + (group*32)];
+			if(tid < 8)
+				workV[tid + (group*32)] += workV[8 + tid + (group*32)];
+			/* Compute v'b_j */
+			for(i = 0; i < 8; i ++)
+				alpha += workV[i + (group*32)];
+
+			/* Multiply by kth tau. */
+			alpha *= tau[k];
+			
+			/* Compute b_j -= alpha*v
+				If kth thread in group, v is 1 at aelem. */
+			if(tid == k)
+				aelem -= alpha;
+
+			/* Compute b_j -= alpha * v for lower half. */
+			belem -= alpha * blockCache[tid + (k*32)];
 		}
-
 		/* put the elements back. */
-		blockA[refMat] = aelem;
-		blockB[refMat] = belem;
-		refMat += WARPS*ldm;
+		blockA[tid + (j*ldm)] = aelem;
+		blockB[tid + (j*ldm)] = belem;
+		__syncthreads();
 	}
+	__threadfence();
 }
+
 __device__ void device_doDAPP	(float* blockV,
 				float* blockA,
 				float* blockB,
@@ -1342,13 +1416,13 @@ __global__ void doDAPP	(float* blockV,
 	__shared__ volatile float workingVector[32];
 	__shared__ volatile float blockCache[32*32];
 
-	/*device_doDAPP	(blockV,
+	device_MdoDAPP	(blockV,
 			blockA,
 			blockB,
 			blockTau,
 			ldm,
 			workingVector,
-			blockCache);*/
+			blockCache);
 }
 
 /* Fetch and return a task's information from the task structure, at location
@@ -1387,9 +1461,9 @@ __device__ int executeTask	(Task t,
 			blockTau = matTau + CO(t.k*32,t.k*32,ldm);
 			if(TID < 32)
 			{
-				//TIMER_TIC
+				TIMER_TIC
 				device_doQRS	( blockV, blockTau, ldm, workingVector, blockCache );
-				//TIMER_TOC(tid_doingQRS);
+				TIMER_TOC(tid_doingQRS);
 			}
 //			if(TID == 0)printf("%d: QRS at %d,%d\n", blockIdx.x, t.k, t.k);
 			break;
@@ -1399,12 +1473,12 @@ __device__ int executeTask	(Task t,
 			blockV = mat + CO(t.k*32,t.k*32,ldm);
 			blockA = mat + CO(t.k*32,t.m*32,ldm);
 			blockTau = matTau + CO(t.k*32,t.k*32,ldm);
-			if(TID < 32)
-			{
-				//TIMER_TIC
-				device_doSAPP	( blockV, blockA, blockTau, ldm, workingVector, blockCache );
-				//TIMER_TOC(tid_doingSAPP);
-			}
+			//if(TID < 32){
+				//for(j = 0; j < 32; j ++) blockCache[TID + (j*32)] = 0;
+				TIMER_TIC
+				device_MdoSAPP	( blockV, blockA, blockTau, ldm, workingVector, blockCache );
+				TIMER_TOC(tid_doingSAPP);
+			//}
 //			if(TID == 0)printf("%d: SAPP from %d,%d to %d,%d\n", blockIdx.x, t.k, t.k, t.k, t.m);
 			break;
 		}
@@ -1415,9 +1489,9 @@ __device__ int executeTask	(Task t,
 			blockTau = matTau + CO(t.l*32,t.k*32,ldm);
 			if(TID < 32)
 			{
-				//TIMER_TIC
+				TIMER_TIC
 				device_doQRDW	( blockA, blockB, blockTau, ldm, workingVector, blockCache );
-				//TIMER_TOC(tid_doingQRD);
+				TIMER_TOC(tid_doingQRD);
 			}
 //			if(TID == 0)printf("%d: QRD on %d,%d; %d,%d\n", blockIdx.x, t.k, t.k, t.l, t.k);
 			break;
@@ -1428,9 +1502,9 @@ __device__ int executeTask	(Task t,
 			blockA = mat + CO(t.k*32,t.m*32,ldm);
 			blockB = mat + CO(t.l*32,t.m*32,ldm);
 			blockTau = matTau + CO(t.l*32,t.k*32,ldm);
-			//TIMER_TIC
+			TIMER_TIC
 			device_MdoDAPP	(blockV, blockA, blockB, blockTau, ldm,	workingVector, blockCache);
-			//TIMER_TOC(tid_doingDAPP);
+			TIMER_TOC(tid_doingDAPP);
 //			if(TID == 0)printf("%d: DAPP from %d,%d to %d,%d; %d,%d\n", blockIdx.x, t.l, t.k, t.k, t.m, t.l, t.m);
 			break;
 		}
@@ -1462,10 +1536,10 @@ __global__ void taskKernel	(float* matrix,
 		/* retrieve task from the cuda queue */
 		if(TID == 0)
 		{
-			//TIMER_TIC
+			TIMER_TIC
 			taskid = runner_cuda_gettask();
 			s_tid = taskid;
-			//TIMER_TOC(tid_gettingtasks)
+			TIMER_TOC(tid_gettingtasks)
 		}
 
 		/* have finished if taskid is less than 0. Might also have invalid task */
@@ -1478,12 +1552,13 @@ __global__ void taskKernel	(float* matrix,
 		/* get the specifics of this task from the main task structure */
 		if( TID == 0 )
 		{
-			//TIMER_TIC
+			TIMER_TIC
 			task.l = taskGrid[taskid].l;
 			task.m = taskGrid[taskid].m;
 			task.k = taskGrid[taskid].k;
 			task.taskType = taskGrid[taskid].taskType;
-			//TIMER_TOC(tid_taskinfo)
+			//printf("%d: %d at (%d,%d)\n", blockIdx.x, task.taskType, task.l, task.m);
+			TIMER_TOC(tid_taskinfo)
 		}
 
 		/* perform the activity specified by the task t */
@@ -1497,9 +1572,9 @@ __global__ void taskKernel	(float* matrix,
 		At the same time, insert each newly activated task into the cuda queue */
 		if( TID == 0 )
 		{
-			//TIMER_TIC
+			TIMER_TIC
 			completeATask( taskGrid, M, N, task );
-			//TIMER_TOC(tid_completing)
+			TIMER_TOC(tid_completing)
 		}
 	}
 	TIMER_TOC(tid_total);
@@ -1548,9 +1623,9 @@ int displayDeviceProps()
 }
 
 extern "C"
-void cudaQRTask(float* mat, int m, int n, int ldm)
+void cudaQRTask(float* mat, int m, int n, int ldm, int maxblocks)
 {
-	int totalTasks, p = m/32, q = n/32, queuelen = p * q + 1, j;
+	int totalTasks, p = m/32, q = n/32, queuelen = p * q, j;
 	volatile int *dev_data;
 	//initialise task structure on GPU
 	volatile Task* dev_taskGrid;
@@ -1605,19 +1680,21 @@ void cudaQRTask(float* mat, int m, int n, int ldm)
 	
 	cudaEventRecord(start,0);
 
-	taskKernel<<<p*q > NBLOCKS ? NBLOCKS : p*q,32*WARPS>>>(	dev_m, dev_tau,
-							m, n, totalTasks, dev_taskGrid, p, q );
+	//taskKernel<<<p*q > maxblocks ? maxblocks : p*q,32*WARPS>>>(	dev_m, dev_tau,
+	taskKernel<<<2,32*WARPS>>>(	dev_m, dev_tau,
+					m, n, totalTasks, dev_taskGrid, p, q );
 
 	cudaEventRecord(stop,0);
 	cudaEventSynchronize(stop);
 	
 	cudaEventElapsedTime(&time, start, stop);
-	printf("Kernel time taken: %f\n", time);
+	printf("Kernel time taken for %d: %f\n", 2, time);
+	//printf(": %f\n", time);
 	cudaEventDestroy(start);
 	cudaEventDestroy(stop);
 	
 	cuerr = cudaMemcpyFromSymbol(timers, cuda_timers, tid_count*sizeof(float), 0, cudaMemcpyDeviceToHost );
-	if( cuerr != cudaSuccess )
+	/*if( cuerr != cudaSuccess )
 		printf("fail %d.\n", cuerr);
 	else
 		printf("Waiting for tasks: %5.3fms\nDoing operations: %5.3fms\nTotal time: %5.3fms\n", timers[tid_waitfortask]/128/clockS, timers[tid_working]/128/clockS, timers[ tid_total ]/128/clockS );
@@ -1627,7 +1704,7 @@ void cudaQRTask(float* mat, int m, int n, int ldm)
 
 	for(j = tid_gettingtasks; j <= tid_completing; j++)
 		printf("Doing processing item %d: %5.3f\n", j, timers[j]/128/clockS);
-	printf("Mutex time: %5.3f\n", timers[tid_mutex]/128/clockS);
+	printf("Mutex time: %5.3f\n", timers[tid_mutex]/128/clockS);*/
 
 	for(j = 0; j < n; j ++)
 	{
@@ -1650,6 +1727,119 @@ void cudaQRTask(float* mat, int m, int n, int ldm)
 		printf("error freeing matrix %d\n\n", cuerr);
 
 	cudaDeviceReset();//printf("error freeing m %d\n", cuerr);
+}
+__global__ void kern_testDAPP	(float* mat,
+				float* tau)
+{
+	/* blockV is block(1,0), blockA is (0, blockIdx.x), blockB is (1,blockIdx.x) */
+	__shared__ volatile float workVector[64], block[32*32];
+
+	__syncthreads();
+	TIMER_TIC
+	
+	device_MdoDAPP	(mat + 32,
+			mat + (blockIdx.x*64),
+			mat + 32 + (blockIdx.x*64),
+			tau,
+			64,
+			workVector, block);
+	__syncthreads();
+	//TIMER_TOC(tid_test);
+}
+
+extern "C"
+void testDAPP(float* timings, int n, int nblocks)
+{
+	float 	*h_data, *dev_data,
+		*h_tau, *dev_tau;
+	float 	time, timers[tid_count];
+	int i, b, t;
+
+	cudaError_t cuerr;
+	cudaEvent_t start, stop;
+
+	for(t = 0; t < n; t ++)
+	{
+		srand(5);
+		cudaEventCreate(&start);
+		cudaEventCreate(&stop);
+	
+		h_data = (float*) malloc((1+nblocks)*64*32*sizeof(float));
+		h_tau = (float*) malloc(32*sizeof(float));
+
+		cudaMalloc((void**) &dev_data, (1+nblocks)*64*32*sizeof(float) );
+		cudaMalloc((void**) &dev_tau, 32*sizeof(float));
+
+		for(i = 0; i < 64*32; i ++)
+			h_data[i] = ((float)(rand() % 101) - 50.0) / 50.0;
+
+		for(i = 0; i < 32; i ++)
+			h_tau[i] = ((float)(rand() % 101) - 50.0) / 50.0;
+
+		for(b = 1; b <= nblocks; b ++)
+		{
+			for(i = 0; i < 64*32; i ++)
+				h_data[i + (b*64*32)] = h_data[i];//use same data for all tests
+		}
+
+		cudaMemcpy(dev_data, h_data, (1+nblocks)*64*32*sizeof(float), cudaMemcpyHostToDevice);
+		cudaMemcpy(dev_tau, h_tau, 32*sizeof(float), cudaMemcpyHostToDevice);
+
+		//timers_reset<<<1,1>>>();
+
+		cudaEventRecord(start,0);
+		kern_testDAPP<<<nblocks,WARPS*32>>>(dev_data, dev_tau);
+		cudaEventRecord(stop,0);
+		cudaEventSynchronize(stop);
+
+		cudaMemcpyFromSymbol(timers, cuda_timers, tid_count*sizeof(float), 0, cudaMemcpyDeviceToHost );
+
+		cudaEventElapsedTime(&time, start, stop);
+
+		timings[t] = time * nblocks;
+		//timings[t] = timers[tid_test];
+
+		cuerr = cudaGetLastError();
+		if(cuerr != cudaSuccess)
+		{
+			printf("ERROR!!! %d\n", cuerr);
+			break;
+		}
+		cudaFree(dev_data);
+		cudaFree(dev_tau);
+	
+		free(h_data);
+		free(h_tau);
+	
+		cudaEventDestroy(start);
+		cudaEventDestroy(stop);
+		//cudaDeviceReset();
+	}
+}
+
+void doCUDADAPP(float* mat)
+{
+	float* dev_mat;
+	cudaError_t cuerr;
+	
+	cudaMalloc((void**) &dev_mat, 64*64*sizeof(float));
+	
+	cudaMemcpy(dev_mat, mat, 64*64*sizeof(float), cudaMemcpyHostToDevice);
+
+	doDAPP<<<1,WARPS*32>>>(dev_mat + 32,		//V
+			dev_mat	+ (32*64),	//A
+			dev_mat + 32 + (32*64),	//B
+			dev_mat,		//Tau
+			64);			//ldm
+
+	cudaMemcpy(mat, dev_mat, 64*64*sizeof(float), cudaMemcpyDeviceToHost);
+	
+	cuerr = cudaGetLastError();
+
+	if(cuerr != cudaSuccess)
+		printf("error %d\n", cuerr);
+
+	cudaFree(dev_mat);
 }
 
 /*extern "C"

@@ -27,11 +27,29 @@ enum {ZERO, RAND, RANDZO, EYE};
 int main	(int argc,
 		char* argv[])
 {
+	//Declare 64x64 matrix, random data in all.
+	
+	/*float results[10000];
+	double avg;
+	const int tests = 100;
+	int r, b;
+
+	for(b = 1; b < 129; b ++)
+	{
+		testDAPP(results, tests, b);
+		avg = 0.0;
+		for(r = 0; r < tests; r ++)
+		{
+			//printf("%5f\n", results[r]/b);
+			avg += results[r]/b;
+		}
+		printf("%d: %2f\n", b, avg/tests);
+	}*/
 	int numtests, mtiles, ntiles;
 
 	numtests = argc > 1 ? atoi(argv[1]) : 1;
-	mtiles = argc > 2 ? atoi(argv[2]) : 2;
-	ntiles = argc > 3 ? atoi(argv[3]) : 2;
+	mtiles = argc > 2 ? atoi(argv[2]) : 4;
+	ntiles = argc > 3 ? atoi(argv[3]) : 4;
 
 	tiledQR( numtests, mtiles, ntiles );
 
@@ -69,7 +87,7 @@ void tiledQR( int numtests, int mtiles, int ntiles )
 		printf("\n(%d, %d):\n", m, n);
 
 		initMatrix(matData, m, n, ldm, RANDZO);
-		initMatrix(matTau, n, n, ldm, ZERO);
+		initMatrix(matTau, m, n, ldm, ZERO);
 
 		copyMatrix(matData, m, n, ldm, matCPU);
 	
@@ -80,7 +98,8 @@ void tiledQR( int numtests, int mtiles, int ntiles )
 		while( times ++ < numtests )
 		{
 			copyMatrix(matData, m, n, ldm, matComp);
-			cudaQRTask(matComp, m, n, ldm);
+			//printf("%d", times + 1);
+			cudaQRTask(matComp, m, n, ldm, 1);//times + 1);
 
 			if( ! checkEqual(matComp, matCPU, m, n, ldm) )
 			{
@@ -376,6 +395,7 @@ void doATask	(Task t,
 				qRSingleBlock_WY(blockV, blockTau, b, b, ldm, colVect[0]);
 			else
 				qRSingleBlock(blockV, b, b, ldm, colVect[0]);
+			
 			//printf("qr %d,%d\n", t.k, t.k);
 			break;
 		}
@@ -389,6 +409,7 @@ void doATask	(Task t,
 				applySingleBlock_WY( blockA, blockV, blockTau, b, b, ldm, colVect );
 			else
 				applySingleBlock(blockA, b, b, ldm, blockV);
+			
 			//printf("sapp %d,%d %d,%d\n", t.k, t.k, t.k, t.m);
 			break;
 		}
@@ -402,6 +423,7 @@ void doATask	(Task t,
 				qRDoubleBlock_WY(blockA, blockB, blockTau, b, b, b, ldm, colVect[0]);
 			else
 				qRDoubleBlock(blockA, b, b, blockB, b, ldm, colVect[0]);
+			
 			//printf("qrd %d,%d %d,%d\n", t.k, t.k, t.l, t.k);
 			break;
 		}
@@ -419,6 +441,7 @@ void doATask	(Task t,
 							b, b, ldm);
 			else
 				applyDoubleBlock(blockA, b, blockB, b, b, ldm, blockV);
+			
 			//printf("dapp %d,%d %d,%d %d,%d\n", t.l, t.k, t.k, t.m, t.l, t.m);
 			break;
 		}
@@ -460,7 +483,7 @@ void updatekthSingleWY	(float* blockV,
 	//	tauBlock[(k*ldm) + i] *= (-beta);
 
 	/* Insert beta on the diagonal of Tau */
-	tauBlock[(k*ldm) + k] = beta;
+	tauBlock[k] = beta;
 }
 
 void updateSingleQ_WY	(float* block,
@@ -599,8 +622,8 @@ void applySingleBlock_WY(float* block,
 		/* Apply successive reflectors with b_j - tau_k*v_k*v_k'b_j */
 		for(k = 0; k < n; k ++)
 		{
-			/* tau_k is at blockV(k,k) */
-			tau = tauBlock[(k*ldm) + k];
+			/* tau_k is at blockV(k) */
+			tau = tauBlock[k];
 	
 			/* Compute v_k'*b_j, with v_k,k = 1 implied */
 			beta = block[(j*ldm) + k];//*1.0
@@ -660,7 +683,7 @@ void updateDoubleQ_WY	(float* blockA,
 	for(i = 0; i < mb; i ++)
 		blockB[(k*ldm) + i] = hhVector[i];
 
-	blockTau[(k*ldm) + k] = tau;
+	blockTau[k] = tau;
 }
 
 void qRDoubleBlock_WY	(float* blockA,
@@ -716,7 +739,7 @@ void applyDoubleBlock_WY	(float* blockV,
 		for(k = 0; k < n; k ++)
 		{
 			/* tau = 2/v'v, computed earlier, stored in T(k,k). */
-			tau = blockTau[(k*ldm) + k];
+			tau = blockTau[k];
 
 			/* Compute beta = v_k'b_j. */
 			/* v_k is >0 (=1) only at position k in top half. */
@@ -1357,7 +1380,7 @@ void initMatrix(float* mat, int m, int n, int ldm, int mode)
 			else if(mode == RAND)
 				mat[CO(r,c,ldm)] = rand() % 32;
 			else if(mode == RANDZO)
-				mat[CO(r,c,ldm)] = ((float)(rand() % 33) - 16.0) / 16.0;
+				mat[CO(r,c,ldm)] = ((float)(rand() % 201) - 100.0) / 100.0;
 			else if(mode == EYE)
 				mat[CO(r,c,ldm)] = r == c ? 1 : 0;
 		}
