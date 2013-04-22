@@ -405,11 +405,11 @@ void doATask	(Task t,
 			blockA = mat + CO((t.k*b),(t.m*b),ldm);
 			blockTau= tau + CO((t.k*b),(t.k*b),ldm);
 
-			if( useWY )
+			/*if( useWY )
 				applySingleBlock_WY( blockA, blockV, blockTau, b, b, ldm, colVect );
 			else
 				applySingleBlock(blockA, b, b, ldm, blockV);
-			
+			*/
 			//printf("sapp %d,%d %d,%d\n", t.k, t.k, t.k, t.m);
 			break;
 		}

@@ -16,8 +16,9 @@ extern "C" {
 #define TASK_NONE 1
 #define TASK_DONE 2
 
-#define NBLOCKS 128
-#define WARPS 1 
+#define MXBLOCKS 128
+#define WARPS 4
+/* WARPS MUST be factor of blocksize. */
 
 enum Type {QRS, SAPP, QRD, DAPP};
 enum Status {READY, DOING, DONE, NONE, NOTASKS};
@@ -1086,7 +1087,7 @@ __device__ void device_MdoSAPP	(float* blockV,
 				float* blockA,
 				float* blockTau,
 				int ldm,
-				volatile float workingVector[],
+				volatile float workingVect[],
 				volatile float blockCache[])
 {
 	int 	j, k, i,
@@ -1094,42 +1095,43 @@ __device__ void device_MdoSAPP	(float* blockV,
 		group = TID/32;
 
 	__shared__ volatile float tau[32];
-	__shared__ volatile float groupCache[WARPS*32];
+	__shared__ volatile float groupCache[32*WARPS];
+	
+	volatile float *cacheCol = groupCache + (group*32);
 	
 	float 	alpha,
 		belem;
 	
-	volatile float *cacheCol = groupCache + (group*32);
-	
+	__syncthreads();
 	/* Load tau Vector */
 	if(TID < 32)
 		tau[TID] = blockTau[TID];
+	__syncthreads();
 	
-	/* ERROR HERE. READING VALUES CHANGES DATA IN BLOCKV. FUCK. */
 	/* Load Vectors */
-	for(j = 0; j < 32; j ++)//group; j < 32; j += WARPS)
+	for(j = group; j < 32; j += WARPS)
 	{
+		if(tid < j)
+		{
+			blockCache[tid + (j*32)] = 0.0;
+		}
+		if(tid == j)
+		{
+			blockCache[tid + (j*32)] = 1.0;
+		}
 		if(tid > j)
 		{
 			blockCache[tid + (j*32)] = blockV[tid + (j*ldm)];
 		}
 	}
-
-	for(j = group; j < 32; j += WARPS)
-	{
-		if(tid < j)
-			blockCache[tid + (j*32)] = 0.0;
-		if(tid == j)
-			blockCache[tid + (j*32)] = 1.0;
-	}
-
 	__syncthreads();
-	
+
 	/* Compute b_j -= tau*v*v'b_j, for all vectors in blockCached V */
 	for(j = group; j < 32; j += WARPS)
 	{
 		belem = blockA[tid + (j*ldm)];
 		/* For each vector in block of vectors. */
+
 		for(k = 0; k < 32; k ++)
 		{
 			/* Compute alpha = v'*b_j */
@@ -1285,12 +1287,12 @@ __device__ void device_MdoDAPP	(float* blockV,
 		tid, group,
 		refMat, refCache;
 	
-	__syncthreads();
 	tid = TID%32;
 	group = TID/32;
 
 	refMat = tid + group*ldm;
-	refCache = tid + group*32;
+	refCache = tid + group*32;	
+	__syncthreads();
 
 	if(TID < 32)
 		tau[TID] = blockTau[TID];
@@ -1315,6 +1317,7 @@ __device__ void device_MdoDAPP	(float* blockV,
 		/* Load the elements of the column to process. */
 		aelem = blockA[tid + (j*ldm)];
 		belem = blockB[tid + (j*ldm)];
+		__syncthreads();
 		
 		/* Compute and apply b_j = b_j - tau*vv'b_j
 			for each Householder vector 1..32. */
@@ -1347,6 +1350,7 @@ __device__ void device_MdoDAPP	(float* blockV,
 
 			/* Compute b_j -= alpha * v for lower half. */
 			belem -= alpha * blockCache[tid + (k*32)];
+			__syncthreads();
 		}
 		/* put the elements back. */
 		blockA[tid + (j*ldm)] = aelem;
@@ -1476,7 +1480,7 @@ __device__ int executeTask	(Task t,
 			//if(TID < 32){
 				//for(j = 0; j < 32; j ++) blockCache[TID + (j*32)] = 0;
 				TIMER_TIC
-				device_MdoSAPP	( blockV, blockA, blockTau, ldm, workingVector, blockCache );
+				//device_MdoSAPP	( blockV, blockA, blockTau, ldm, workingVector, blockCache );
 				TIMER_TOC(tid_doingSAPP);
 			//}
 //			if(TID == 0)printf("%d: SAPP from %d,%d to %d,%d\n", blockIdx.x, t.k, t.k, t.k, t.m);
@@ -1681,14 +1685,14 @@ void cudaQRTask(float* mat, int m, int n, int ldm, int maxblocks)
 	cudaEventRecord(start,0);
 
 	//taskKernel<<<p*q > maxblocks ? maxblocks : p*q,32*WARPS>>>(	dev_m, dev_tau,
-	taskKernel<<<2,32*WARPS>>>(	dev_m, dev_tau,
+	taskKernel<<<p*q -1 > MXBLOCKS ? MXBLOCKS : p*q -1,32*WARPS>>>(	dev_m, dev_tau,
 					m, n, totalTasks, dev_taskGrid, p, q );
 
 	cudaEventRecord(stop,0);
 	cudaEventSynchronize(stop);
 	
 	cudaEventElapsedTime(&time, start, stop);
-	printf("Kernel time taken for %d: %f\n", 2, time);
+	printf("Kernel time taken for %d: %f\n", p*q -1 > MXBLOCKS ? MXBLOCKS : p*q -1, time);
 	//printf(": %f\n", time);
 	cudaEventDestroy(start);
 	cudaEventDestroy(stop);

@@ -1,4 +1,5 @@
-CUDA_MYFLAGS=-O3 --maxrregcount=24 -lineinfo -src-in-ptx -Xptxas="-v" -arch=sm_20 -use_fast_math
+CUDA_FIX_MEMISSUES=-dlcm=cg
+CUDA_MYFLAGS=-O3 --maxrregcount=24 -lineinfo -src-in-ptx -Xptxas="-v $(CUDA_FIX_MEMISSUES)" -arch=sm_20 -use_fast_math
 qr : obj/qrdecomp.o obj/gridscheduler.o obj/gpucalc.cu.o makefile
 	nvcc $(CUDA_MYFLAGS) obj/gpucalc.cu.o obj/qrdecomp.o obj/gridscheduler.o -lm -lpthread -o qr
 qr-nocuda : obj/qrdecomp.o obj/gridscheduler.o makefile
