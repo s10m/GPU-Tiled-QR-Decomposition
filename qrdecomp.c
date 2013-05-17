@@ -47,9 +47,9 @@ int main	(int argc,
 	}*/
 	int numtests, mtiles, ntiles;
 
-	numtests = argc > 1 ? atoi(argv[1]) : 1;
-	mtiles = argc > 2 ? atoi(argv[2]) : 4;
-	ntiles = argc > 3 ? atoi(argv[3]) : 4;
+	//numtests = argc > 1 ? atoi(argv[1]) : 1;
+	mtiles = argc > 1 ? atoi(argv[1]) : 4;
+	ntiles = argc > 1 ? atoi(argv[1]) : 4;
 
 	tiledQR( numtests, mtiles, ntiles );
 
@@ -80,11 +80,11 @@ void tiledQR( int numtests, int mtiles, int ntiles )
 
 	srand(5);
 
-	for(currentM = mtiles; currentM <= mtiles; currentM ++)
-	{
-		m = currentM * b;
-		n = currentM * b;
-		printf("\n(%d, %d):\n", m, n);
+	//for(currentM = mtiles; currentM <= mtiles; currentM ++)
+	//{
+		//m = currentM * b;
+		//n = currentM * b;
+		//printf("\n(%d, %d):\n", m, n);
 
 		initMatrix(matData, m, n, ldm, RANDZO);
 		initMatrix(matTau, m, n, ldm, ZERO);
@@ -94,12 +94,13 @@ void tiledQR( int numtests, int mtiles, int ntiles )
 		taskQRP_threads	(matData, matCPU, matTau,
 				m, n, b, ldm,
 				1);
+		//printf("done CPU\n");
 	
-		while( times ++ < numtests )
-		{
+		/*while( times ++ < numtests )
+		{*/
 			copyMatrix(matData, m, n, ldm, matComp);
-			//printf("%d", times + 1);
-			cudaQRTask(matComp, m, n, ldm, 1);//times + 1);
+			//printf("%d: ", times);
+			cudaQRTask(matComp, m, n, ldm, 128);
 
 			if( ! checkEqual(matComp, matCPU, m, n, ldm) )
 			{
@@ -111,8 +112,7 @@ void tiledQR( int numtests, int mtiles, int ntiles )
 				//printf("Correct.\n");
 				successes ++;
 			}
-			putchar('\n');
-		}
+		//}
 		times = 0;
 
 		//printf("%d failures and %d successes out of %d.\n", failures, successes, numtests);
@@ -121,7 +121,7 @@ void tiledQR( int numtests, int mtiles, int ntiles )
 		successes = 0;
 
 		cudaDeviceReset();
-	}
+	//}
 
 	deleteMatrix(matCPU);
 	deleteMatrix(matComp);
@@ -216,7 +216,7 @@ void taskQRP_threads	(float* matData, float* matResult,
 
 	/* Get finishing timing data & register result. */
 	tock = getticks();
-	printf("tiled CPU in %5.2f ms\n", (float)(tock - tick)/3.8e9*1000);
+	printf("CPU: %5.2f ms\n", (float)(tock - tick)/3.8e9*1000);
 
 	/* Clean up per-thread working vector. */	
 	for(i = 0; i < NUMTHREADS; i ++)
@@ -392,7 +392,7 @@ void doATask	(Task t,
 			blockTau = tau + CO((t.k*b),(t.k*b),ldm);
 			
 			if( useWY )
-				qRSingleBlock_WY(blockV, blockTau, b, b, ldm, colVect[0]);
+				SGEQRF(blockV, blockTau, b, b, ldm, colVect[0]);
 			else
 				qRSingleBlock(blockV, b, b, ldm, colVect[0]);
 			
@@ -405,11 +405,11 @@ void doATask	(Task t,
 			blockA = mat + CO((t.k*b),(t.m*b),ldm);
 			blockTau= tau + CO((t.k*b),(t.k*b),ldm);
 
-			/*if( useWY )
-				applySingleBlock_WY( blockA, blockV, blockTau, b, b, ldm, colVect );
+			if( useWY )
+				SLARFT( blockA, blockV, blockTau, b, b, ldm, colVect );
 			else
 				applySingleBlock(blockA, b, b, ldm, blockV);
-			*/
+			
 			//printf("sapp %d,%d %d,%d\n", t.k, t.k, t.k, t.m);
 			break;
 		}
@@ -420,7 +420,7 @@ void doATask	(Task t,
 			blockTau = tau + CO((t.l*b),(t.k*b),ldm);
 
 			if( useWY )
-				qRDoubleBlock_WY(blockA, blockB, blockTau, b, b, b, ldm, colVect[0]);
+				STSQRF(blockA, blockB, blockTau, b, b, b, ldm, colVect[0]);
 			else
 				qRDoubleBlock(blockA, b, b, blockB, b, ldm, colVect[0]);
 			
@@ -435,7 +435,7 @@ void doATask	(Task t,
 			blockTau = tau + CO((t.l*b),(t.k*b),ldm);
 
 			if( useWY )
-				applyDoubleBlock_WY(	blockV,
+				SSSRFT(	blockV,
 							blockA, blockB,
 							blockTau,
 							b, b, ldm);
@@ -503,7 +503,7 @@ void updateSingleQ_WY	(float* block,
 	/* Finish computation of 2/v'v */
 	beta = (-2)/beta;
 	
-	for(j = k; j < n; j ++)
+	for(j = k; j < 32; j ++)
 	{
 		/* Compute prod = v'A_j */
 		prod = block[(j*ldm) + k];//(k,k) to (k,n)
@@ -529,10 +529,10 @@ void updateSingleQ_WY	(float* block,
 				workVector);
 }
 
-void qRSingleBlock_WY	(float* block,
-			float* tauBlock,
-			int m, int n, int ldm,
-			float* workVector)
+void SGEQRF	(float* block,
+		float* tauBlock,
+		int m, int n, int ldm,
+		float* workVector)
 {
 	int k;
 	float* xVect;
@@ -556,11 +556,11 @@ void qRSingleBlock_WY	(float* block,
 	}
 }
 
-void applySingleBlock_WY(float* block,
-			float* blockV,
-			float* tauBlock,
-			int m, int n, int ldm,
-			float** w)
+void SLARFT	(float* block,
+		float* blockV,
+		float* tauBlock,
+		int m, int n, int ldm,
+		float** w)
 {
 	//applySingleBlock( block, m, n, ldm, blockV );
 	/* 	Perform the transformation block = block - blockV*(tauBlock*(blockV^T*block)) 
@@ -686,14 +686,14 @@ void updateDoubleQ_WY	(float* blockA,
 	blockTau[k] = tau;
 }
 
-void qRDoubleBlock_WY	(float* blockA,
-			float* blockB,
-			float* blockTau,
-			int ma,
-			int mb,
-			int n,
-			int ldm,
-			float* hhVector)
+void STSQRF	(float* blockA,
+		float* blockB,
+		float* blockTau,
+		int ma,
+		int mb,
+		int n,
+		int ldm,
+		float* hhVector)
 {
 	int k;
 	float* xVectA, *xVectB;
@@ -720,10 +720,10 @@ void qRDoubleBlock_WY	(float* blockA,
 	}
 }
 
-void applyDoubleBlock_WY	(float* blockV,
-				float* blockA, float* blockB,
-				float* blockTau,
-				int b, int n, int ldm)
+void SSSRFT	(float* blockV,
+		float* blockA, float* blockB,
+		float* blockTau,
+		int b, int n, int ldm)
 {
 	int i, j, k;
 

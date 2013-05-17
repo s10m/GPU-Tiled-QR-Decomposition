@@ -32,16 +32,16 @@ void doATask(Task, float*, float*, int, int, float**, int);
 float* multAB(float*, int, int, int, float*, int, int);
 
 void qRSingleBlock(float*, int, int, int, float*);
-void qRSingleBlock_WY(float*, float*, int, int, int, float*);
+void SGEQRF(float*, float*, int, int, int, float*);
 
 void qRDoubleBlock(float*, int, int, float*, int, int, float*);
-void qRDoubleBlock_WY(float*, float*, float*, int, int, int, int, float*);
+void STSQRF(float*, float*, float*, int, int, int, int, float*);
 
 void applySingleBlock(float*, int, int, int, float*);
-void applySingleBlock_WY(float*, float*, float*, int, int, int, float**);
+void SLARFT(float*, float*, float*, int, int, int, float**);
 
 void applyDoubleBlock(float*, int, float*, int, int, int, float*);
-void applyDoubleBlock_WY(float*, float*, float*, float*, int, int, int);
+void SSSRFT(float*, float*, float*, float*, int, int, int);
 
 void insSingleHHVector(float*, int, float*);
 

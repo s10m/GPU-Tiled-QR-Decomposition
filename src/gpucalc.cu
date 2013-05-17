@@ -16,8 +16,8 @@ extern "C" {
 #define TASK_NONE 1
 #define TASK_DONE 2
 
-#define MXBLOCKS 128
-#define WARPS 4
+#define MXBLOCKS 128 
+#define WARPS 1
 /* WARPS MUST be factor of blocksize. */
 
 enum Type {QRS, SAPP, QRD, DAPP};
@@ -25,8 +25,13 @@ enum Status {READY, DOING, DONE, NONE, NOTASKS};
 
 typedef struct{
 	enum Type taskType;
-	int l, m, k;
+		/* The co-ordinates of the task in the task grid. */
+	int 	l, m,
+		/* The step at which the task was generated. */
+		k;
+	
 	enum Status taskStatus;
+
 	int mutex;
 } Task;
 
@@ -93,11 +98,6 @@ enum {
 
 /* Timers. */
 __device__ float cuda_timers [ tid_count ];
-
-/* The per-SM task queues. */
-//__device__ struct queue_cuda cuda_queues[ cuda_maxqueues ];
-/*__constant__ int cuda_nrqueues;
-__constant__ int cuda_queue_size;*/
 
 __device__ __constant__ int cuda_queue_size;
 __device__ struct queue_cuda q;
@@ -211,7 +211,6 @@ __device__ void cuda_queue_puttask ( int tid ) {
 	atomicAdd( (int *) &q.numIn, 1);	
 }
     
-    
 /**
  * @brief Get a task from the given task queue.
  *
@@ -247,47 +246,53 @@ __device__ int runner_cuda_gettask ( void ) {
     	return tid;
 }
 
-__device__ void init_cuda_queue( int qlen, int totalNumTasks, volatile int *newData)
+/*
+ * @brief Initialise the cuda_queue struct and sets the queue to all -1.
+ *
+ * @param qlen The number of elements in the queue.
+ * @param totalNumTasks The total number of tasks to be computed.
+ * @param newData Pointer to the queue.
+ *
+ * Should be run with launch configuration of <<<1,1>>>
+ */
+__device__ void init_cuda_queue	(int qlen,
+				int totalNumTasks,
+				volatile int *newData)
 {
 	int j;
 
-	if( ( TID == 0 ) && (blockIdx.x == 0) )
-	{
-		q.first = 0;
-		q.last = 0;
-		q.rec_count = 0;
-		q.count = totalNumTasks;
-		q.data = newData;
-		q.numIn = 0;
-	}
+	/* Initialise values in the struct. */
+	q.first = 0;
+	q.last = 0;
+	q.rec_count = 0;
+	q.count = totalNumTasks;
+	q.data = newData;
+	q.numIn = 0;
 
+	/* Initialise the queue. */
 	for( j = 0; j < qlen; j ++)
 	{
 		q.data[j] = -1;
 	}
 }
 
-/* Insert new information into the task structure at (x,y), then place the
-   newly revised index into the scheduler queue. */
-
-__device__ void makeTask(volatile Task* taskGrid, int M, int x, int y, enum Type newType, enum Status newStatus, int newK )
-{
-	cuda_mutex_lock(&tgrid(x,y).mutex);
-	if( atomicCAS( (int *) &tgrid(x,y).taskStatus, (int) NONE, (int) READY) == NONE ||
-		atomicCAS( (int *) &tgrid(x,y).taskStatus, (int) DONE, (int) READY ) == DONE )
-	{
-		tgrid(x,y).taskType = newType;
-		tgrid(x,y).k = newK;
-	
-		cuda_queue_puttask( TLOC(x,y) );
-	}
-	cuda_mutex_unlock(&tgrid(x,y).mutex);
-}
-
-__device__ void init_cuda_scheduler( volatile Task* taskGrid, int M, int N)
+/*
+ * @brief Initialises the task grid to default values, and inserts the initial task.
+ *
+ * @param taskGrid The matrix to be used to store the tasks.
+ * @param M The number of rows in the task matrix.
+ * @param N The number of columns in the task matrix.
+ *
+ * Runs through all indices and sets the values of the structs at that point to the defaults.
+ * Should not be called until init_cuda_queue has returned.
+ */
+__device__ void init_cuda_scheduler	(volatile Task* taskGrid,
+					int M, int N)
 {
 	int i , j, ref;
 
+	/* Possibly loops the wrong way round. Might need to swap these.
+	   Potential cause for not working with non-square. */
 	for(j = 0; j < M; j ++)
 	{
 		ref = j*M;
@@ -297,44 +302,115 @@ __device__ void init_cuda_scheduler( volatile Task* taskGrid, int M, int N)
 			taskGrid[ref].m = j;
 			taskGrid[ref].taskStatus = NONE;
 			taskGrid[ref].k = 0;
+			taskGrid[ref].topBusy = 0;
+
 			cuda_mutex_unlock(&taskGrid[ref].mutex);
 			ref ++;
 		}
 	}
 
+	/* Insert the initial task into the task grid. */
 	makeTask( taskGrid, M, 0, 0, QRS, READY, 0 );
 }
 
-__device__ enum Type getNextType(int p, int q, int k)
+/*
+ * @brief Changes the state of a task in the task structure and adds the index to the queue.
+ * 
+ * @param taskGrid The matrix of tasks.
+ * @param M The number of rows in the task matrix.
+ * @param l The row of the task to change the state of.
+ * @param m The column to change the state of.
+ * @param newType The type to change the task to.
+ * @param newStatus The status to change the task to. Not necessarily required but potentially useful.
+ * @param newK The value of k the new task should have.
+ *
+ * Checks if task has already been modified, locks task then changes task, setting the new status to READY.
+ * Following this, the index is added to the cuda queue.
+ */
+__device__ void makeTask(volatile Task* taskGrid,
+			int M,
+			int l, int m,
+			enum Type newType, enum Status newStatus,
+			int newK )
+{
+	/* Lock the task. */
+	cuda_mutex_lock(&tgrid(l,m).mutex);
+
+	/* Check if it has been modified already. There are scenarios where this can happen. I think. */
+	if( atomicCAS( (int *) &tgrid(l,m).taskStatus, (int) NONE, (int) READY) == NONE ||
+		atomicCAS( (int *) &tgrid(l,m).taskStatus, (int) DONE, (int) READY ) == DONE )
+	{
+		/* Modify the struct at this location. */
+		tgrid(l,m).taskType = newType;
+		tgrid(l,m).k = newK;
+	
+		/* Add the index to the queue. */
+		cuda_queue_puttask( TLOC(x,y) );
+	}
+	/* Unlock the task. */
+	cuda_mutex_unlock(&tgrid(x,y).mutex);
+}
+
+/*
+ * @brief Returns the type of a derived task, given a location and value of k.
+          Does not need to check if location is in matrix.
+ * @param p The row to use.
+ * @param q The column to use.
+ * @param k The value of k to use.
+ * @returns The type of a derived task at (p,q) at time k.
+ *
+ * Works in O(1) time by comparing location and k.
+ * The combination of these parameters uniquely determines the new type returned.
+ */
+__device__ enum Type getNextType(int p, int q,
+				int k)
 {
 	enum Type ret;
+
+	/* Note that (p,q) is never < (k,k) */
+	
+	/* If on same row as k, is either QRS or SAPP. */
 	if(p == k)
 	{
+		/* If on diagonal (p,q) == (k,k), is QRS. */
 		if(q == k)
-			ret = QRS;//on diagonal
+			ret = QRS;
+		/* If on same row, but on diagonal, is SAPP. */
 		else if(q > k)
-			ret = SAPP;//on diagonal row
+			ret = SAPP;
 	}
+	/* If on different row to k. */
 	else if(p > k)
 	{
+		/* If on a different row, but same column i.e (p,q) == (p,k) is QRD. */
 		if(q == k)
-			ret = QRD;//on diagonal column
+			ret = QRD;
+		/* If anywhere else i.e (p,q) > (k,k), is DAPP. */
 		else if(q > k)
-			ret = DAPP;//in the rest
+			ret = DAPP;
 	}
 
 	return ret;
 }
 
-__device__ int inGrid(int M, int N, int x, int y)//1 if (x,y) in grid, 0 if not
+/* @brief Checks (-1,-1) < (l,m) < (M,N)
+ * @param M The number of rows in the task matrix.
+ * @param N The number of columns in the task matrix.
+ * @param l The row to check.
+ * @param m The column to check.
+ * @returns 1 if true, 0 if false.
+ */
+__device__ int inGrid	(int M, int N,
+			int l, int m)
 {
 	int ret = 1;
 
-	if (x >= M)
+	/* Proceed by eliminating possibilities, modifying ret as soon as possible. */
+	if (l >= M)
 		ret = 0;
-	else if (y >= N)
+	else if (m >= N)
 		ret = 0;
-	else if (x < 0)
+	else if (l < 0)
 		ret = 0;
 	else if (y < 0)
 		ret = 0;
@@ -342,91 +418,179 @@ __device__ int inGrid(int M, int N, int x, int y)//1 if (x,y) in grid, 0 if not
 	return ret;
 }
 
-//checks k equal or greater and done status
-__device__ int genericdone(volatile Task* taskGrid, int M, int x, int y, int k)
+/* 
+ * @brief Checks if the task at (x,y) has been completed.
+ * @param taskGrid The task matrix.
+ * @param M The number of rows in the matrix.
+ * @param x The row to check.
+ * @param y The column to check.
+ * @param k The timestep to check.
+ * @returns 1 if task has been done, 0 otherwise.
+ *
+ * If the task is at the current timestep, check if it has been completed.
+ * If task's timestep is more then the checking timestep, the task has definitely been completed some time in the past.
+ * If task's timestep is less than the checking timestep, the task has definitely not been completed.
+ * Must be called with a mutex lock on (x,y).
+ */
+__device__ int genericdone	(volatile Task* taskGrid, int M,
+				int x, int y, int k)
 {
 	int ret = 0;
 
+	/* Check if at current timestep. */
 	if(tgrid(x,y).k == k)
 	{
+		/* If it has been completed, ret is true. */
 		if(tgrid(x,y).taskStatus == DONE)
 			ret = 1;
 	}
-	if(tgrid(x,y).k > k)
+	/* If task is at later timestamp, has definitely been completed. */
+	else if(tgrid(x,y).k > k)
 		ret = 1;
 
 	return ret;
 }
 
-//checks if a sqr has been performed for step k
-__device__ int qrsdone(volatile Task* taskGrid, int M, int k)
+/*
+ * @brief Checks if a QRS has been done for timestep k.
+ * @param taskGrid The task matrix.
+ * @param M The number of rows in the task matrix.
+ * @param k The timestep to check.
+ * @returns 1 if QRS has been done, 0 otherwise.
+ * 
+ * Works by checking the (k,k)th task, if it has been done, and is a QRS.
+ */
+__device__ int qrsdone	(volatile Task* taskGrid, int M,
+			int k)
 {
 	int ret = 0;
 	
+	/* Lock the task. */
 	cuda_mutex_lock(&tgrid(k,k).mutex);
+	/* Check if the task at (k,k) has been done. */
 	if(genericdone(taskGrid, M, k, k, k))
 	{
+		/* Possibly redundant check. */
 		if(tgrid(k,k).taskType == QRS)
 			ret = 1;
 	}
+	/* Unlock the task. */
 	cuda_mutex_unlock(&tgrid(k,k).mutex);
 
 	return ret;
 }
 
-//checks if a dapp has been applied to (x,y) at step k
-__device__ int dappdone(volatile Task* taskGrid, int M, int N, int x, int y, int k)
+/* 
+ * @brief Checks if a DAPP task at (x,y), k has been completed.
+ * @param taskGrid The task matrix.
+ * @param M The number of rows in the task matrix.
+ * @param N The number of columns in the task matrix.
+ * @param x The row to check.
+ * @param y The column to check.
+ * @param k The timestamp to check.
+ * @returns 1 if has been done, 0 otherwise.
+ */
+__device__ int dappdone	(volatile Task* taskGrid, int M, int N,
+			int x, int y, int k)
 {
 	int ret = 0;
 
+	/* If requested is out of grid, return true. ??? */
 	if(!inGrid(M, N, x, y))
 		return 1;
 
+	/* Lock the task. */
 	cuda_mutex_lock(&tgrid(x,y).mutex);
-	if(genericdone(taskGrid, M, x, y, k))//finished operation
+	/* Check if the task there has been finished. */
+	if(genericdone(taskGrid, M, x, y, k))
 	{
-		if(tgrid(x,y).taskType == DAPP)//is dapp task
+		/* Check if finished task is DAPP. */
+		if(tgrid(x,y).taskType == DAPP)
 			ret = 1;
 	}
+	/* Unlock the task. */
 	cuda_mutex_unlock(&tgrid(x,y).mutex);
 
 	return ret;
 }
 
-//checks if float qr has been performed on (x,y) at step k
-__device__ int qrddone(volatile Task* taskGrid, int M, int N, int x, int y, int k)
+/*
+ * @brief Checks if a QRD at (x,y), k has been completed.
+ * @param taskGrid The task matrix.
+ * @param M The number of rows in the task matrix.
+ * @param N The number of columns in the task matrix.
+ * @param x The row to check.
+ * @param y The column to check.
+ * @param k The timestamp to check.
+ * @returns 1 if has been done, 0 otherwise.
+ */
+__device__ int qrddone	(volatile Task* taskGrid, int M, int N,
+			int x, int y, int k)
 {
 	int ret = 0;
 	
+	/* Lock the task. */
 	cuda_mutex_lock(&tgrid(x,y).mutex);
-	if(genericdone(taskGrid, M, x, y, k))//check if task finished
+	/* Check if task is finished. */
+	if(genericdone(taskGrid, M, x, y, k))
 	{
-		if(tgrid(x,y).taskType == QRD)//is qrd task
+		/* Check if task there is a QRD. Possibly redundant. */
+		if(tgrid(x,y).taskType == QRD)
 			ret = 1;
 	}
+	/* Unlock task. */
 	cuda_mutex_unlock(&tgrid(x,y).mutex);
 	
 	return ret;
 }
 
-//can always do qrs if in grid
-__device__ int candoQRS(volatile Task* taskGrid, int M, int N, int x, int y, int k)
+/*
+ * @brief Checks if it is possible to do a QRS at the location (x,y) == (k,k).
+ * @param taskGrid The task matrix.
+ * @param M The number of rows in the task matrix.
+ * @param N The number of Columns in the task matrix.
+ * @param x The row to check.
+ * @param y The column to check.
+ * @param k The timestamp to check.
+ * @returns 1 if can do a QRS at (x,y), 0 otherwise.
+ *
+ * Must be called with (x,y) == (k,k).
+ * Just checks if (x,y) is in matrix or not.
+ */
+
+__device__ int candoQRS	(volatile Task* taskGrid, int M, int N,
+			int x, int y, int k)
 {
+	/* Return whether (x,y) is in the task matrix or not. */
 	return inGrid(M, N, x, y);
 }
 
-//if can apply at (x,y) step k, returns 1. 0 otherwise
-__device__ int candoSAPP(volatile Task* taskGrid, int M, int N, int x, int y, int k)
+/*
+ * @brief Checks if it is possible to do a SAPP at the location (x,y), k.
+ * @param taskGrid The task matrix.
+ * @param M The number of rows in the task matrix.
+ * @param N The number of Columns in the task matrix.
+ * @param x The row to check.
+ * @param y The column to check.
+ * @param k The timestamp to check.
+ * @returns 1 if can do SAPP at (x,y), k 0 otherwise.
+ *
+ * SAPP at (x,y), k requires the QRS at (k,k) to be completed.
+ * Also required is whatever task at (x,y) for previous k (can't be further back than 1 timestep) to be completed.
+ */
+__device__ int candoSAPP(volatile Task* taskGrid, int M, int N,
+			int x, int y, int k)
 {
 	int ret = 0;
 
+	/* If on top row of grid, always return true. */
 	if (!inGrid(M, N, x - 1, y))
 		return 1;
 
-	//checkqrs(k,k)k done, check vectors are ready
+	/* Check kth QRS is completed. */
 	if(qrsdone(taskGrid, M, k))
 	{
-		//checkdapp(x,y)k-1 done//check previous step completed
+		/* Check the DAPP at (x,y), k-1 is completed. */
 		if(dappdone(taskGrid, M, N, x, y, k - 1))
 			ret = 1;
 	}
@@ -434,139 +598,215 @@ __device__ int candoSAPP(volatile Task* taskGrid, int M, int N, int x, int y, in
 	return ret;
 }
 
+/*
+ * @brief Checks if it is possible to do a QRD at the location (x,y), k.
+ * @param taskGrid The task matrix.
+ * @param M The number of rows in the task matrix.
+ * @param N The number of Columns in the task matrix.
+ * @param x The row to check.
+ * @param y The column to check.
+ * @param k The timestamp to check.
+ * @returns 1 if can do QRD at (x,y), k, 0 otherwise.
+ *
+ * QRD at (x,y), k requires the task at (x-1,y) to be completed.
+ * If k > 0, requires the DAPP at (x,y), k-1 to be completed.
+ */
 __device__ int candoQRD(volatile Task* taskGrid, int M, int N, int x, int y, int k)
 {
 	int ret = 0;
+
+	/* If (x,y) is not in the grid, return false. */
+	if(!inGrid(M, N, x, y))
+		return 0;
+
+	/* Lock the task above. */
 	cuda_mutex_lock(&tgrid(x-1,y).mutex);
-	//checkgendone(x-1,k)k done check if row above is done (qrd or qrs)
+
+	/* Check whatever is above is done. Is either QRS or QRD above, so generic check. */
 	if(genericdone(taskGrid, M, x-1, y, k))
 	{
-		//checkdapp(x,y)k-1 done check if dapp in place has been done
-		if(k == 0)//if no previous
+		/* If first k, no need to check previous at (x,y) are done. return true. */
+		if(k == 0)
 			ret = 1;
+		/* If k > 0, check if DAPP at (x,y), k-1 is done. If it is then return true, false otherwise. */
 		else if(dappdone(taskGrid, M, N, x, y, k-1))
 			ret = 1;
 	}
+	/* Unlock the above task. */
 	cuda_mutex_unlock(&tgrid(x-1,y).mutex);
-
-	if(!inGrid(M, N, x, y))
-		ret = 0;
 
 	return ret;
 }
 
+/*
+ * @brief Checks if it is possible to do a DAPP at the location (x,y), k.
+ * @param taskGrid The task matrix.
+ * @param M The number of rows in the task matrix.
+ * @param N The number of Columns in the task matrix.
+ * @param x The row to check.
+ * @param y The column to check.
+ * @param k The timestamp to check.
+ * @returns 1 if can do DAPP at (x,y), k, 0 otherwise.
+ *
+ * DAPP at (x,y), k requires both the SAPP/DAPP at (x-1,y), k completed,
+ * AND the QRD at (x,k), k to be completed.
+ * Also requires the task at (x,y), k-1 to be complete.
+ */
+
 __device__ int candoDAPP(volatile Task* taskGrid, int M, int N, int x, int y, int k)
 {
 	int ret = 0;
-	//checkqrd(x,k)k done
+	/* Check if the QRD at (x,k) is done. */
 	if(qrddone(taskGrid, M, N, x, k, k))
 	{
-		//checkgendone(x-1,y)k done
+		/* Lock the task above. */
 		cuda_mutex_lock(&tgrid(x-1,y).mutex);
+		
+		/* Check SAPP/DAPP above is done. */
 		if(genericdone(taskGrid, M, x-1, y, k))
 		{
-			//checkdapp(x,y)k-1 done
+			/* If no previous tasks possible, return true. */
 			if(k == 0)
 				ret = 1;
-			else
-			{
-				if(dappdone(taskGrid, M, N, x, y, k-1))
+			/* If k > 0, check DAPP at (x,y), k-1 is complete. */
+			else if(dappdone(taskGrid, M, N, x, y, k-1))
 					ret = 1;
-			}
 		}
+		/* Unlock the task above. */
 		cuda_mutex_unlock(&tgrid(x-1,y).mutex);
 	}
 
 	return ret;
 }
 
-/* Register the finished task as completed, then go through the possible 
-   successors and add them to the task structure if it is possible to add them */
+/* @brief Updates the task matrix given a completed task.
+ * @param taskGrid The task matrix.
+ * @param M The number of rows in the task matrix.
+ * @param N The number of Columns in the task matrix.
+ * @param t A struct containing details of the completed task.
+ * 
+ * First sets the old task to be DONE.
+ * Then uses a switch statement to decide which new tasks to generate and places the ready indices into the queue.
+ */
+
 __device__ void completeATask	(volatile Task* taskGrid,
 				int M, int N,
 				Task t)
 {
-	int k, j, p, q;
+	/* Parameters of the incoming task. */
+	int 	k, j, p, q;
+	/* Types used for switches. */
 	enum Type tType, tTypeNext;
 	
+	/* Read parameters from struct into variables. */
 	p = t.l;
 	q = t.m;
 	k = tgrid(p,q).k;
+
+	/* Get the type to be used in the switch. */
 	tType = getNextType(p, q, k);
 	
+	/* Lock the finished task. */
 	cuda_mutex_lock(&tgrid(p,q).mutex);
+	/* Register the finished task as done. */
 	tgrid(p,q).taskStatus = DONE;
+	/* Unlock the finished task. */
 	cuda_mutex_unlock(&tgrid(p,q).mutex);
 	
+	/* Main switch. Decides based on type of finished task what to update and where. */
 	switch(tType)
 	{
+		/* QRS at (p,q), k unlocks:
+		   - QRD at (p+1,q), k
+		   - Row of SAPP at (p,(q+1):N), k */
 		case QRS:
 		{
-			if(candoQRD(taskGrid, M, N, p+1, q, k))//check one below
+			if(candoQRD(taskGrid, M, N, p+1, q, k))
 				makeTask(taskGrid, M, p+1, q, QRD, READY, k);
 
-			for(j = k + 1; j < N; j ++)//check along row
+			for(j = k + 1; j < N; j ++)
 			{
 				if(candoSAPP(taskGrid, M, N, p, j, k))
 					makeTask(taskGrid, M, p, j, SAPP, READY, k);
 			}
+
 			break;
 		}
+		/* SAPP at (p,q), k unlocks:
+		   - DAPP at (p+1,q), k */
 		case SAPP:
 		{
-			if(candoDAPP(taskGrid, M, N, p+1, q, k))//check one below
+			if(candoDAPP(taskGrid, M, N, p+1, q, k))
 				makeTask(taskGrid, M, p+1, q, DAPP, READY, k);
+
 			break;
 		}
+		/* QRD at (p,q), k unlocks:
+		   - QRD at (p+1,q), k
+		   - Row of DAPP at (p,(q+1):N), k */
 		case QRD:
 		{
-			if(inGrid(M, N, p+1,q))
-			{
-				if(candoQRD(taskGrid, M, N, p+1, q, k))//check one below
-					makeTask(taskGrid, M, p+1, q, QRD, READY, k);
-			}
+			if(candoQRD(taskGrid, M, N, p+1, q, k))
+				makeTask(taskGrid, M, p+1, q, QRD, READY, k);
 
 			for(j = k + 1; j < N; j ++)
 			{
-				if(candoDAPP(taskGrid, M, N, p, j, k))//check along row
+				if(candoDAPP(taskGrid, M, N, p, j, k))
 					makeTask(taskGrid, M, p, j, DAPP, READY, k);
 			}
 			
 			break;
 		}
+		/* DAPP at (p,q), k unlocks:
+		   - different tasks depending on type of (p,q) at k+1
+		   - DAPP at (p+1,q), k */
 		case DAPP:
 		{
+			/* Get type for (p,q) at next timestep. */
 			tTypeNext = getNextType(p, q, k + 1);
 
-			switch(tTypeNext)//check whether can activate any for next step
+			/* Switch on this new "next" type. */
+			switch(tTypeNext)
 			{
+				/* DAPP at (k+1,k+1), k+1 unlocks:
+				   - QRS at (k+1,k+1), k+1 */
 				case QRS:
 				{
 					if(candoQRS(taskGrid, M, N, p, q, k + 1))
 						makeTask(taskGrid, M, p, q, QRS, READY, k + 1);
+
 					break;
 				}
+				/* DAPP at (k+1,q), k+1 unlocks:
+				   - SAPP at (k+1,q), k+1 */
 				case SAPP:
 				{
 					if(candoSAPP(taskGrid, M, N, p, q, k + 1))
 						makeTask(taskGrid, M, p, q, SAPP, READY, k + 1);
+
 					break;
 				}
+				/* DAPP at (p,k+1), k+1 unlocks:
+				   - QRD at (p,k+1), k+1 */
 				case QRD:
 				{
 					if(candoQRD(taskGrid, M, N, p, q, k + 1))
 						makeTask(taskGrid, M, p, q, QRD, READY, k + 1);
+
 					break;
 				}
+				/* DAPP at (p,q) > (k+1,k+1) unlocks:
+				   - DAPP at (p,q), k+1 */
 				case DAPP:
 				{
 					if(candoDAPP(taskGrid, M, N, p, q, k + 1))
 						makeTask(taskGrid, M, p, q, DAPP, READY, k + 1);
+
 					break;
 				}
 			}
 
-			if(candoDAPP(taskGrid, M, N, p + 1, q, k))//check one below in current step
+			if(candoDAPP(taskGrid, M, N, p + 1, q, k))
 				makeTask(taskGrid, M, p + 1, q, DAPP, READY, k);
 			
 			break;
@@ -574,117 +814,160 @@ __device__ void completeATask	(volatile Task* taskGrid,
 	}
 }
 
-//computes the sum of the elements of the size startN sumVector, storing the result in sumVector[0] in 5 cycles
-__device__ void reduceSum(	volatile float* sumVector,
+/*
+ * @brief Performs a reduction sum on a vector, storing the result in v[0].
+ * @param sumVector SMEM The array to compute over.
+ * @param startN The number of elements in the vector.
+ *
+ * Computes a binary reduction to find the sum of the elements in the vector,
+ * storing the result in the first element of the vector.
+ * should be called where threadDim.x <= 1 warp
+ */
+__device__ void reduceSum	(volatile float* sumVector,
 				char startN)
 {
+	/* Start with n = startN/2 */
 	char n = startN >> 1;
 
 	while(n > 0)
 	{
-		if(TID < n)
-			sumVector[TID] = sumVector[TID] + sumVector[TID + n];
-		n = n >> 1;//n /= 2
+		/* Use first n threads to add up to 2n elements. */
+		if(TID < n)	sumVector[TID] = sumVector[TID] + sumVector[TID + n];
+		
+		/* Divide n by 2 for next iteration. */
+		n = n >> 1;
 	}
 }	
 
-__device__ void calcHH(	float matelem,//the block containing a column to calculate the householder vector of
-			volatile float hhVector[],//the array to store the resulting vector in
-			int k)//the step at which this was called
+/*
+ * @brief Computes a householder vector for a single tile QR decomposition, storing the result in a shared array.
+ * @param matelem The TIDth element of the column to be used for calculation.
+ * @param hhVector SMEM The array used to calculate and store the vector.
+ * @param k The timestep at which this is called. i.e where the diagonal falls.
+ * 
+ * Calculates a householder vector for the vector passed as elements into a shared array.
+ * Used only by SGEQRF_CUDA.
+ */
+__device__ void calcHH	(float matelem,
+			volatile float hhVector[],
+			int k)
 {
+	/* To store the value of 1/(v[k] + sign(v[k])*||v||). */
 	float localdiv;
+	/* Stores the sign of v[k] */
 	int sign;
 
-	//read vectors in from below the diagonal(k)
-
+	/* Read vectors into shared memory from below the diagonal. */
 	if(TID >= k)
 		hhVector[TID] = matelem;
-	if(TID < k)//zero above diagonal
-		hhVector[TID] = 0;
 
-	//square each element
-	hhVector[TID] *= hhVector[TID];
-	
-	//ideally only do required computation here; not necessarily 16, 8, 4, 2, 1
-	//reduction to calculate the sum of squares of the 32 element vector
-	reduceSum(hhVector, 32);
-
-	//calculate sign*norm and put in local variable
-	localdiv = sqrt(hhVector[0]);
-
-	//if norm not 0
-	if(localdiv != 0.0)
-	{
-		hhVector[TID] = matelem;
-
-		sign = hhVector[k] >= 0 ? 1 : -1;
-		
-		localdiv *= sign;
-		//add element in block at (k,k) to norm and store in vector
-		localdiv += hhVector[k];
-
-		//divide because want v(k+1:m) = v(k+1:m)/v(k) = v(k+1:m) * (1/v(k))
-		localdiv = 1.0/localdiv;
-	}
-	else//if norm is zero, 
-		localdiv = 1.0;
-
+	/* Above the diagonal, set to 0. */
 	if(TID < k)
 		hhVector[TID] = 0;
+
+	/* Square each element to find ||v|| = sqrt(sum(v[i]^2)) */
+	hhVector[TID] *= hhVector[TID];
+	
+	/* Reduce to find sum of squares. */
+	reduceSum(hhVector, 32);
+
+	/* Set localdiv to equal ||v|| */
+	localdiv = sqrt(hhVector[0]);
+
+	/* According to Householder algorithm in Golub & Van Loan. */
+	if(localdiv != 0.0)
+	{
+		/* Load shared to communicate v[k] to all threads. */
+		hhVector[TID] = matelem;
+
+		/* Calculate the sign of v[k] locally. */
+		sign = hhVector[k] >= 0 ? 1 : -1;
+		
+		/* Compute and store localdiv = (||v||)*sign(v[k]) */
+		localdiv *= sign;
+
+		/* Compute and store localdiv = v[k] + (||v||*sign(v[k])) */
+		localdiv += hhVector[k];
+
+		/* Finally compute and store localdiv = 1/(v[k] + ||v||*sign(v[k])) */
+		localdiv = 1.0f/localdiv;
+	}
+	/* If norm is 0, do not change v. */
+	else
+		localdiv = 1.0f;
+
+	/* Compute and store in shared memory v = v/(v[k] + ||v||*sign(v[k])) */
+	if(TID < k)
+		hhVector[TID] = 0.0f;
+	/* v[k]/v[k] = 1 */
 	if(TID == k)
-		hhVector[TID] = 1;
+		hhVector[TID] = 1.0f;
 	if(TID > k)
 		hhVector[TID] = matelem * localdiv;
 }
 
-__device__ void applyHH(volatile float blockCache[],//SHARED the 32*32 matrix block to compute over
-			float* matTau, int ldm,
-			volatile float workingVector[],//SHARED a working space of size 32 used in the computation
-			int k,//the step at which the function was called, A(k:m, k:n) is submatrix to operate on
-			float hhVectorelem)//element of vector storing the householder vector, zero above diagonal
+/*
+ * @brief Applies a householder vector to the submatrix starting at (k,k), also inserts the kth tau value into tau[k].
+ * @param blockCache SMEM The 1024-element array storing the full tile to which the vector will be applied.
+ * @param matTau The tau vector.
+ * @param workingVector SMEM The array used in the computation as a scratchpad.
+ * @param k Defines the submatrix.
+ * @param hhVectorelem Element of the cumulatively-stored householder vector to apply.
+ *
+ * Works by first calculating the kth tau,
+ * then proceeding to apply the vector to successive columns of the matrix A_j
+ * with the formula A_j = A_j - tau[k]*v*(v'A_j).
+ * The kth tau is then stored into memory.
+ */
+__device__ void applyHH(volatile float blockCache[],
+			float* matTau,
+			volatile float workingVector[],
+			int k,
+			float hhVectorelem)
 {
-	float 	y,//y will be -2 divided by the sum of squares of vector
-		z;//z will be v[TID] * sum(A(:,j) .* v) * y
+	float 	ktau,
+		/* Stores the value of ktau*v*v'*A_j */
+		z;
 
-	int 	j;//column counter, reference in block
+	int 	j;
 
-	//thread TID starts at (TID, k)
-	//blockref = (k*32) + TID;
-	
-	//read data for summation
+	/* Read householder vector into shared memory to calculate ktau = 2/v'v */
 	workingVector[TID] = hhVectorelem;
-	//square elements of working vector
+	/* Square the elements to start finding v'v */
 	workingVector[TID] *= workingVector[TID];
 
-	//reduction to find sum of squares of workingVector
+	/* Perform a reduction to compute v'v and store the result in v[0]. */
 	reduceSum(workingVector, 32);
 
-	//make y a register equal to -2/sum of squares of v(v'*v)
-	y = 2.0 / workingVector[0];
+	/* Finally compute ktau = 2/v'v */
+	ktau = 2.0 / workingVector[0];
 	
-	for(j = k; j < 32; j ++)//submatrix A(k:m,k:n)
+	/* For the columns of the submatrix starting at (k,k). */
+	for(j = k; j < 32; j ++)
 	{
-		//fill workingVector with the componentwise multiplication of householder vector (zero above k) and column j of block
+		/* Fill the shared memory to calculate v'*A_j */
 		workingVector[TID] = blockCache[TID+(j*32)] * hhVectorelem;
 
-		//reduction to find sum of multiplication of column of block with hhVector
+		/* Perform reduction to compute v'*A_j, storing the result in v[0] */
 		reduceSum(workingVector, 32);
 		
-		//set z = TIDth element of v times -2/v'v
-		z = hhVectorelem * y;
+		/* Compute and store z = ktau*v[tid] */
+		z = hhVectorelem * ktau;
 
-		//multiply z by sum of componentwise multiplication of column with hhVector in workingVector[0]
+		/* Compute and store z = (v'A_j)*(ktau*v[tid]) */
 		z *= workingVector[0];
 		
-		//add z to block(TID,j). zero above diagonal
+		/* Apply with A_j[tid] = A_j[tid] - v'A_j*ktau*v[tid] */
 		blockCache[TID + (j*32)] -= z;
 	}
 	
-	if(TID > k)//store essential part of vector below diagonal
-		blockCache[TID + k*32] = hhVectorelem;//insert essential part of vector below diagonal in column k of block
+	/* Store the essential (below diagonal) portion of householder vector below the diagonal in the block at column k. */
+	if(TID > k)
+		blockCache[TID + k*32] = hhVectorelem;
 	
+	/* Store the kth tau. */
 	if(TID == 0)
-		matTau[k] = y;
+		matTau[k] = ktau;
 }
 
 __device__ void calcDoubleHHWY	(float topElem,
@@ -711,16 +994,16 @@ __device__ void calcDoubleHHWY	(float topElem,
 		lowSum += blockCache[i + (k*32)];
 	
 	alpha = sqrt(topSum + lowSum);
-	sign = first >= 0 ? 1 : -1;
+	sign = first >= 0.f ? 1.f : -1.f;
 
-	if(alpha != 0.0)
+	if(alpha != 0.0f)
 	{
 		/* Zeroth element is = first + sign*norm */
 		alpha = first + sign * alpha;
-		alpha = 1.0/alpha;
+		alpha = 1.0f/alpha;
 	}
 	else
-		alpha = 1.0;
+		alpha = 1.0f;
 
 	//topElem *= alpha;
 	lowElem *= alpha;
@@ -728,140 +1011,7 @@ __device__ void calcDoubleHHWY	(float topElem,
 	blockCache[TID + (k*32)] = lowElem;
 }
 
-__device__ void calcDoubleHH	(float topElem,//element of top block
-				float lowElem,
-				volatile float hhVector[], //SHARED 32x1 array to insert vector
-				int k)//step at which called. use column k
-{
-	float tmp;//elemK not used in TID > 0
-	int sign;
-
-	if(TID < k)//zero above diagonal in top
-		hhVector[TID] = 0.0;
-
-	if(TID == k)//top nonzero element
-		hhVector[k] = topElem;
-
-	if(TID > k)//zero below diagonal in top
-		hhVector[TID] = 0.0;
-
-	//all read lower block in
-	hhVector[TID + 32] = lowElem;
-
-	if(TID == k)//kth thread holds non zero element in top block
-	{
-		sign = topElem >= 0 ? 1 : -1;
-	}
-
-	//all threads hold elements from bottom block
-	tmp = hhVector[TID + 32];
-
-	//square top nonzero in hhVector
-	if(TID == k)
-		hhVector[k] *= hhVector[k];
-
-	//square each element in bottom block
-	hhVector[TID + 32] *= hhVector[TID + 32];
-
-	//reduce to compute sum of squares in 0th element of 64 element hhVector
-	reduceSum(hhVector, 64);
-
-	if(TID == k)
-	{
-		//store sign * norm in kth position
-		hhVector[k] = sign * sqrt(hhVector[0]);
-
-		if(hhVector[k] != 0.0)
-		{
-			//add sign*norm to kth element and store
-			hhVector[k] = topElem + hhVector[k];
-			
-			//divide because want to divide by hhVector[k]
-			hhVector[k] = 1.0/hhVector[k];
-		}
-		else//norm zero
-			hhVector[k] = 1.0;
-	}
-
-	//normalise by multiplying by kth element
-	if(TID != k)
-		hhVector[32 + TID] = tmp * hhVector[k];
-	if(TID == k)
-		hhVector[32 + k] = tmp * hhVector[k];
-
-	if(TID == k)//top part is 1 on diagonal
-		hhVector[k] = 1.0;
-	else if(TID != k)//zero elsewhere
-		hhVector[TID] = 0.0;
-}
-
-__device__ void applyDoubleHH	(float topRow[],
-				float lowRow[],
-				float* blockTau, int ldm,
-				volatile float workingVector[],
-				int k,
-				float hhVectorElem)
-{
-	float	y,//-2/v'v
-		zupp, zlow;//y * v[i] *sum(A(:,j) .* v) for both blocks
-
-	int 	j;//column counter
-
-	//copy hhVector and square square each element for summation
-	if(TID == k)
-		workingVector[TID] = 1.0;
-	if(TID != k)
-		workingVector[TID] = 0.0;
-
-	workingVector[TID + 32] = hhVectorElem * hhVectorElem;
-	
-	//reduce to find sum of squares
-	reduceSum(workingVector, 64);
-	
-	//set y = -2/sum of squares
-	y = 2 / workingVector[0];
-
-	//for each column
-	for(j = k; j < 32; j ++)
-	{
-		//fill working vector[i] with top block(i,j) * hhVector[i]
-		if(TID == k)
-			workingVector[TID] = topRow[j];
-		if(TID != k)
-			workingVector[TID] = 0.0;
-
-		//fill workingVector[i + 32] with bottom block(i,j) * hhVector[i+32]
-		workingVector[TID + 32] = lowRow[j] * hhVectorElem;
-
-		//sum to find sum of componentwise multiplication
-		reduceSum(workingVector, 64);
-		
-		//set zupp = TIDth element of hhvector times -2/v'v
-		if(TID == k)
-			zupp = y;
-		if(TID != k)
-			zupp = 0.0;
-
-		zlow = y * hhVectorElem;
-
-		//multiply both by sum of multiplication
-		zupp *= workingVector[0];
-		zlow *= workingVector[0];
-		
-		//add to top block element
-		topRow[j] -= zupp;
-
-		//add to bottom block element
-		lowRow[j] -= zlow;
-	}
-	
-	if(TID == 0)
-		blockTau[k] = y;
-	
-	lowRow[k] = hhVectorElem;
-}
-
-__device__ void device_doQRS	( float* matrix, float* matTau,
+__device__ void SGEQRF_CUDA	( float* matrix, float* matTau,
 				int ldm,
 				volatile float workingVector[],
 				volatile float blockCache[])
@@ -889,7 +1039,6 @@ __device__ void device_doQRS	( float* matrix, float* matTau,
 		//calculate the application of the hhvector along row TID
 		applyHH	(blockCache,
 			matTau,
-			ldm,
 			workingVector,
 			k,
 			workingVector[TID]);
@@ -914,7 +1063,7 @@ __global__ void doQRS( float* matrix, float* tau, int ldm)
 	__shared__ volatile float workingVector[32];
 	__shared__ volatile float blockCache[32*32];
 	
-	device_doQRS	(matrix, tau,
+	SGEQRF_CUDA	(matrix, tau,
 			ldm,
 			workingVector,
 			blockCache);
@@ -933,7 +1082,7 @@ __device__ void applyOneHHVectD	(float* topElem,
 	if(TID == k)
 		workV[TID] = *topElem;
 	if(TID != k)
-		workV[TID] = 0.0;
+		workV[TID] = 0.0f;
 
 	workV[TID] += *lowElem * blockCache[TID + (k*32)];
 
@@ -953,7 +1102,7 @@ __device__ void applyOneHHVectD	(float* topElem,
 	*lowElem -= alpha;
 }
 
-__device__ void device_doQRDW	(float* blockA, float* blockB, float* blockTau,
+__device__ void STSQRF_CUDA	(float* blockA, float* blockB, float* blockTau,
 				int ldm,
 				volatile float tauVect[],
 				volatile float blockCache[])//32*32 temp space
@@ -976,7 +1125,7 @@ __device__ void device_doQRDW	(float* blockA, float* blockB, float* blockTau,
 		if(TID <= j)
 			topElem = blockA[TID + (j*ldm)];
 		if(TID > j)
-			topElem = 0;
+			topElem = 0.f;
 
 		lowElem = blockB[TID + (j*ldm)];
 
@@ -995,10 +1144,10 @@ __device__ void device_doQRDW	(float* blockA, float* blockB, float* blockTau,
 				blockCache);
 
 		/* Compute new tau = 2/v'v */
-		tau = 1.0;
+		tau = 1.0f;
 		for(i = 0; i < 32; i ++)
 			tau += blockCache[i + (j*32)] * blockCache[i + (j*32)];
-		tau = 2.0/tau;
+		tau = 2.0f/tau;
 		
 		if(TID == j)
 			tauVect[j] = tau;
@@ -1023,78 +1172,17 @@ __device__ void device_doQRDW	(float* blockA, float* blockB, float* blockTau,
 	__threadfence();
 }
 
-__device__ void device_doQRD	(float* blockA,  float* blockB, float* blockTau,
-				int ldm,
-				volatile float workingVector[],
-				float topRow[],
-				float lowRow[])
-{
-	int k, j, ref;
-	
-	ref = TID;
-	for(j = 0; j < 32; j ++)//for each column
-	{
-		//read top block
-		topRow[j] = blockA[ref];
-
-		//read lower block into lower 32x32 square
-		lowRow[j] = blockB[ref];
-		ref += ldm;
-	}
-
-	for(k = 0; k < 32; k ++)
-	{
-		//calculate and store the vector
-		calcDoubleHH	(topRow[k],
-				lowRow[k],
-				workingVector,
-				k);
-
-		//apply vector to both tidth rows of the matrix
-		applyDoubleHH	(topRow,
-				lowRow,
-				blockTau,
-				ldm,
-				workingVector,
-				k,
-				workingVector[TID + 32]);
-	}
-
-	ref = TID;
-	for(j = 0; j < 32; j ++)
-	{
-		//write back to correct blocks
-		blockA[ref] = topRow[j];
-		blockB[ref] = lowRow[j];
-		ref += ldm;
-	}
-	__threadfence();
-}
-
-__global__ void doQRD( float* blockA,  float* blockB, float* blockTau, int ldm)
-{
-	__shared__ volatile float workingVector[64];
-	
-	float rowA[32], rowB[32];
-
-	device_doQRD	(blockA, blockB, blockTau, ldm,
-			workingVector,
-			rowA,
-			rowB);
-}
-
-__device__ void device_MdoSAPP	(float* blockV,
+__device__ void SLARFT_CUDA	(float* blockV,
 				float* blockA,
 				float* blockTau,
 				int ldm,
-				volatile float workingVect[],
+				volatile float tau[],
 				volatile float blockCache[])
 {
 	int 	j, k, i,
 		tid = TID%32,
 		group = TID/32;
 
-	__shared__ volatile float tau[32];
 	__shared__ volatile float groupCache[32*WARPS];
 	
 	volatile float *cacheCol = groupCache + (group*32);
@@ -1106,42 +1194,48 @@ __device__ void device_MdoSAPP	(float* blockV,
 	/* Load tau Vector */
 	if(TID < 32)
 		tau[TID] = blockTau[TID];
-	__syncthreads();
 	
 	/* Load Vectors */
 	for(j = group; j < 32; j += WARPS)
 	{
 		if(tid < j)
 		{
-			blockCache[tid + (j*32)] = 0.0;
+			blockCache[tid + (j*32)] = 0.0f;
 		}
 		if(tid == j)
 		{
-			blockCache[tid + (j*32)] = 1.0;
+			blockCache[tid + (j*32)] = 1.0f;
 		}
 		if(tid > j)
 		{
 			blockCache[tid + (j*32)] = blockV[tid + (j*ldm)];
 		}
+		__syncthreads();
 	}
 	__syncthreads();
 
 	/* Compute b_j -= tau*v*v'b_j, for all vectors in blockCached V */
 	for(j = group; j < 32; j += WARPS)
 	{
+		//if(group == 0)
+		//{
 		belem = blockA[tid + (j*ldm)];
+		//__syncthreads();
 		/* For each vector in block of vectors. */
 
 		for(k = 0; k < 32; k ++)
 		{
 			/* Compute alpha = v'*b_j */
 			cacheCol[tid] = blockCache[tid + (k*32)] * belem;
+		//	__syncthreads();
 
 			if(tid < 16)
 				cacheCol[tid] += cacheCol[tid+16];
+		//	__syncthreads();
 			if(tid < 8)
 				cacheCol[tid] += cacheCol[tid+8];
-			//alpha = cacheCol[7];
+		//	__syncthreads();
+
 			alpha = cacheCol[0];
 			for(i = 1; i < 8; i ++)
 				alpha += cacheCol[i];
@@ -1152,60 +1246,10 @@ __device__ void device_MdoSAPP	(float* blockV,
 			
 			/* Compute belem -= alpha */
 			belem -= alpha;
+			__syncthreads();
 		}
-		blockA[tid + (j*ldm)] = belem;
+		blockA[tid + (j*ldm)] = belem;//}
 		__syncthreads();
-	}
-	__threadfence();
-}
-__device__ void device_doSAPP	(float* blockV,
-				float* blockA,
-				float* blockTau,
-				int ldm,
-				volatile float workingVector[],
-				volatile float blockCache[])
-{
-	int 	j, k;
-
-	__shared__ volatile float tau[32];
-	
-	float 	alpha,
-		belem;
-	
-	/* Load tau Vector */
-	tau[TID] = blockTau[TID];
-	
-	/* Load Vectors */
-	//for(j = 0; j < 32; j ++) if(TID > j) blockCache[TID + (j*32)] = blockV[TID + (j*ldm)];
-
-	for(j = 0; j < 32; j ++)
-	{
-		if(TID < j)
-			blockCache[TID + (j*32)] = 0.0;
-		if(TID == j)
-			blockCache[TID + (j*32)] = 1.0;
-	}
-	
-	/* Compute b_j -= tau*v*v'b_j, for all vectors in blockCached V */
-	for(j = 0; j < 32; j ++)
-	{
-		belem = blockA[TID + (j*ldm)];
-		/* For each vector in block of vectors. */
-		for(k = 0; k < 32; k ++)
-		{
-			/* Compute alpha = v'*b_j */
-			workingVector[TID] = blockCache[TID + (k*32)] * belem;
-			reduceSum(workingVector, 32);
-			alpha = workingVector[0];
-
-			/* Compute alpha = tau * v_tid * alpha */
-			alpha *= tau[k];
-			alpha *= blockCache[TID + (k*32)];
-			
-			/* Compute belem -= alpha */
-			belem -= alpha;
-		}
-		blockA[TID + (j*ldm)] = belem;
 	}
 	__threadfence();
 }
@@ -1218,66 +1262,22 @@ __global__ void doSAPP	(float* blockV,
 	__shared__ volatile float workingVector[32];
 	__shared__ volatile float blockCache[32*32];
 	
-	device_MdoSAPP	(blockV, blockA, blockTau,
+	SLARFT_CUDA	(blockV, blockA, blockTau,
 			ldm,
 			workingVector,
 			blockCache);
 }
 
-__device__ void applyOneHHVectDW(float* topElem,
-				float* lowElem,
-				int k,
-				volatile float tau[],
-				volatile float blockCache[],
-				int group,//threadIdx.x/32
-				int tid)//threadIdx.x%32
-{
-	float alpha;
-	volatile float *col;
-	int ind = tid + (k<<5);
-	int i;
-
-	__shared__ volatile float workV[WARPS*32];
-	col = workV + (WARPS*group);
-
-	col[tid] = *topElem;
-	alpha = col[k];
-	/* Compute alpha = sum */
-	col[tid] = *lowElem * blockCache[ind];
-
-	/* Partial reduction to find half of v'*b_j */
-	/*if(tid < 16)
-		col[tid] += col[tid + 16];
-	if(tid < 8)
-		col[tid] += col[tid + 8];*/
-
-	/* Simple summation to find second half.
-           Combining the two turned out to be faster than either on their own. */
-	for(i = 0; i < 32; i ++)
-		alpha += col[i];
-
-	/* Multiply by tau */
-	alpha *= tau[k];
-
-	/* Compute alpha *= a_tid,j*v_tid,k */
-	if(tid == k)
-		*topElem -= alpha;
-			
-	/* For lower element. */
-	alpha *= blockCache[ind];
-	*lowElem -= alpha;
-}
-
-__device__ void device_MdoDAPP	(float* blockV,
+__device__ void SSSRFT_CUDA	(float* blockV,
 				float* blockA,
 				float* blockB,
 				float* blockTau,
 				int ldm,
-				volatile float workingVector[],
+				volatile float tau[],
 				volatile float blockCache[])
 {
-	__shared__ volatile float tau[32];
 	__shared__ volatile float workV[WARPS*32];
+	__syncthreads();
 
 	float 	aelem, belem,
 		alpha;
@@ -1292,12 +1292,11 @@ __device__ void device_MdoDAPP	(float* blockV,
 
 	refMat = tid + group*ldm;
 	refCache = tid + group*32;	
-	__syncthreads();
 
 	if(TID < 32)
 		tau[TID] = blockTau[TID];
-
 	__syncthreads();
+
 
 	/* Load the essential HH vector block into shared cache. */
 	for(j = group; j < 32; j += WARPS)
@@ -1306,6 +1305,7 @@ __device__ void device_MdoDAPP	(float* blockV,
 
 		refMat += WARPS*ldm;
 		refCache += WARPS*32;
+		__syncthreads();
 	}
 
 	__syncthreads();
@@ -1317,7 +1317,6 @@ __device__ void device_MdoDAPP	(float* blockV,
 		/* Load the elements of the column to process. */
 		aelem = blockA[tid + (j*ldm)];
 		belem = blockB[tid + (j*ldm)];
-		__syncthreads();
 		
 		/* Compute and apply b_j = b_j - tau*vv'b_j
 			for each Householder vector 1..32. */
@@ -1345,8 +1344,7 @@ __device__ void device_MdoDAPP	(float* blockV,
 			
 			/* Compute b_j -= alpha*v
 				If kth thread in group, v is 1 at aelem. */
-			if(tid == k)
-				aelem -= alpha;
+			if(tid == k)	aelem -= alpha;
 
 			/* Compute b_j -= alpha * v for lower half. */
 			belem -= alpha * blockCache[tid + (k*32)];
@@ -1357,58 +1355,8 @@ __device__ void device_MdoDAPP	(float* blockV,
 		blockB[tid + (j*ldm)] = belem;
 		__syncthreads();
 	}
+	__syncthreads();
 	__threadfence();
-}
-
-__device__ void device_doDAPP	(float* blockV,
-				float* blockA,
-				float* blockB,
-				float* blockTau,
-				int ldm,
-				volatile float workingVector[],
-				volatile float blockCache[])
-{
-	__shared__ volatile float tau[32];
-
-	float 	aelem, belem;
-
-	int j, k, refMat, refCache;
-	
-	refMat = TID;
-	refCache = TID;
-	tau[TID] = blockTau[TID];
-
-	/* Load the essential HH vector block into shared cache. */
-	for(j = 0; j < 32; j ++)
-	{
-		blockCache[refCache] = blockV[refMat];
-
-		refMat += ldm;
-		refCache += 32;
-	}
-
-	/* For each column of the result. */
-	for(j = 0; j < 32; j ++)
-	{
-		/* Load the elements of the vector to process. */
-		aelem = blockA[TID + (j*ldm)];
-		belem = blockB[TID + (j*ldm)];
-		
-		/* For each vector in blockV. */
-		for(k = 0; k < 32; k ++)
-		{
-			/* Compute v'*b_j */
-			applyOneHHVectD	(&aelem,
-					&belem,
-					k,
-					tau,
-					blockCache);
-		}
-		
-		/* put the elements back. */
-		blockA[TID + (j*ldm)] = aelem;
-		blockB[TID + (j*ldm)] = belem;
-	}
 }
 
 __global__ void doDAPP	(float* blockV,
@@ -1420,7 +1368,7 @@ __global__ void doDAPP	(float* blockV,
 	__shared__ volatile float workingVector[32];
 	__shared__ volatile float blockCache[32*32];
 
-	device_MdoDAPP	(blockV,
+	SSSRFT_CUDA	(blockV,
 			blockA,
 			blockB,
 			blockTau,
@@ -1454,7 +1402,7 @@ __device__ int executeTask	(Task t,
 				volatile float blockCache[])
 {
 	float *blockV, *blockA, *blockB, *blockTau;
-
+	__syncthreads();
 	//switch based on the type of task we've got
 	//TIMER_TIC
 	switch(t.taskType)
@@ -1466,7 +1414,7 @@ __device__ int executeTask	(Task t,
 			if(TID < 32)
 			{
 				TIMER_TIC
-				device_doQRS	( blockV, blockTau, ldm, workingVector, blockCache );
+				SGEQRF_CUDA	( blockV, blockTau, ldm, workingVector, blockCache );
 				TIMER_TOC(tid_doingQRS);
 			}
 //			if(TID == 0)printf("%d: QRS at %d,%d\n", blockIdx.x, t.k, t.k);
@@ -1477,12 +1425,9 @@ __device__ int executeTask	(Task t,
 			blockV = mat + CO(t.k*32,t.k*32,ldm);
 			blockA = mat + CO(t.k*32,t.m*32,ldm);
 			blockTau = matTau + CO(t.k*32,t.k*32,ldm);
-			//if(TID < 32){
-				//for(j = 0; j < 32; j ++) blockCache[TID + (j*32)] = 0;
 				TIMER_TIC
-				//device_MdoSAPP	( blockV, blockA, blockTau, ldm, workingVector, blockCache );
+				SLARFT_CUDA	( blockV, blockA, blockTau, ldm, workingVector, blockCache );
 				TIMER_TOC(tid_doingSAPP);
-			//}
 //			if(TID == 0)printf("%d: SAPP from %d,%d to %d,%d\n", blockIdx.x, t.k, t.k, t.k, t.m);
 			break;
 		}
@@ -1494,7 +1439,7 @@ __device__ int executeTask	(Task t,
 			if(TID < 32)
 			{
 				TIMER_TIC
-				device_doQRDW	( blockA, blockB, blockTau, ldm, workingVector, blockCache );
+				STSQRF_CUDA	( blockA, blockB, blockTau, ldm, workingVector, blockCache );
 				TIMER_TOC(tid_doingQRD);
 			}
 //			if(TID == 0)printf("%d: QRD on %d,%d; %d,%d\n", blockIdx.x, t.k, t.k, t.l, t.k);
@@ -1507,14 +1452,14 @@ __device__ int executeTask	(Task t,
 			blockB = mat + CO(t.l*32,t.m*32,ldm);
 			blockTau = matTau + CO(t.l*32,t.k*32,ldm);
 			TIMER_TIC
-			device_MdoDAPP	(blockV, blockA, blockB, blockTau, ldm,	workingVector, blockCache);
+			SSSRFT_CUDA	(blockV, blockA, blockB, blockTau, ldm,	workingVector, blockCache);
 			TIMER_TOC(tid_doingDAPP);
 //			if(TID == 0)printf("%d: DAPP from %d,%d to %d,%d; %d,%d\n", blockIdx.x, t.l, t.k, t.k, t.m, t.l, t.m);
 			break;
 		}
 	}
 	//TIMER_TOC(tid_working);
-	__syncthreads();
+	__threadfence();
 
 	return 1;
 }
@@ -1545,14 +1490,17 @@ __global__ void taskKernel	(float* matrix,
 			s_tid = taskid;
 			TIMER_TOC(tid_gettingtasks)
 		}
+		__syncthreads();
 
 		/* have finished if taskid is less than 0. Might also have invalid task */
 		if(s_tid < 0)
 		{
 			//if(q.rec_count < totTasks)asm("trap;");
-			continue;
+			//continue;
+			return;
 		}
 
+		__syncthreads();
 		/* get the specifics of this task from the main task structure */
 		if( TID == 0 )
 		{
@@ -1564,6 +1512,7 @@ __global__ void taskKernel	(float* matrix,
 			//printf("%d: %d at (%d,%d)\n", blockIdx.x, task.taskType, task.l, task.m);
 			TIMER_TOC(tid_taskinfo)
 		}
+		__syncthreads();
 
 		/* perform the activity specified by the task t */
 		{TIMER_TIC
@@ -1571,6 +1520,7 @@ __global__ void taskKernel	(float* matrix,
 				workVector,
 				blockCache);
 		TIMER_TOC(tid_executing)}
+		__syncthreads();
 
 		/* register task as finished in the task structure 
 		At the same time, insert each newly activated task into the cuda queue */
@@ -1580,6 +1530,7 @@ __global__ void taskKernel	(float* matrix,
 			completeATask( taskGrid, M, N, task );
 			TIMER_TOC(tid_completing)
 		}
+		__syncthreads();
 	}
 	TIMER_TOC(tid_total);
 }
@@ -1604,7 +1555,7 @@ int calcTotalTasks(int m, int n)
 	ret += 3*n*n*m;
 	ret /= 6;
 
-	//printf("%d,%d %d tasks\n",m, n, ret);
+	printf("(%d,%d)\n%d tasks\n",m*32, n*32, ret);
 	return ret;
 }
 
@@ -1684,15 +1635,17 @@ void cudaQRTask(float* mat, int m, int n, int ldm, int maxblocks)
 	
 	cudaEventRecord(start,0);
 
-	//taskKernel<<<p*q > maxblocks ? maxblocks : p*q,32*WARPS>>>(	dev_m, dev_tau,
-	taskKernel<<<p*q -1 > MXBLOCKS ? MXBLOCKS : p*q -1,32*WARPS>>>(	dev_m, dev_tau,
+	//taskKernel<<<1,32*WARPS>>>(	dev_m, dev_tau,
+	taskKernel<<<p*q > maxblocks ? maxblocks : p*q,32*WARPS>>>(	dev_m, dev_tau,
+	//taskKernel<<<p*q > MXBLOCKS ? MXBLOCKS : p*q,32*WARPS>>>(	dev_m, dev_tau,
 					m, n, totalTasks, dev_taskGrid, p, q );
 
 	cudaEventRecord(stop,0);
 	cudaEventSynchronize(stop);
 	
 	cudaEventElapsedTime(&time, start, stop);
-	printf("Kernel time taken for %d: %f\n", p*q -1 > MXBLOCKS ? MXBLOCKS : p*q -1, time);
+	//printf("Kernel time taken for %d: %f\n", p*q > maxblocks ? maxblocks : p*q, time);//p*q/2 > MXBLOCKS ? MXBLOCKS : p*q/2, time);
+	printf("GPU: %5.3f ms\n", time);
 	//printf(": %f\n", time);
 	cudaEventDestroy(start);
 	cudaEventDestroy(stop);
@@ -1741,7 +1694,7 @@ __global__ void kern_testDAPP	(float* mat,
 	__syncthreads();
 	TIMER_TIC
 	
-	device_MdoDAPP	(mat + 32,
+	SSSRFT_CUDA	(mat + 32,
 			mat + (blockIdx.x*64),
 			mat + 32 + (blockIdx.x*64),
 			tau,
