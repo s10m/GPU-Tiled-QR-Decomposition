@@ -329,8 +329,7 @@ __device__ void init_cuda_scheduler	(volatile Task* taskGrid,
 {
 	int i , j, ref;
 
-	/* Possibly loops the wrong way round. Might need to swap these.
-	   Potential cause for not working with non-square. */
+	/* Incorrect loop fixed. Now works with rectangular matrices. */
 	for(j = 0; j < N; j ++)
 	{
 		ref = j*M;
