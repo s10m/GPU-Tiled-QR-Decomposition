@@ -109,7 +109,7 @@ void tiledQR( int numtests, int mtiles, int ntiles )
 			}
 			else
 			{
-				//printf("Correct.\n");
+				printf("Correct.\n");
 				successes ++;
 			}
 		//}

@@ -277,43 +277,6 @@ __device__ void init_cuda_queue	(int qlen,
 }
 
 /*
- * @brief Initialises the task grid to default values, and inserts the initial task.
- *
- * @param taskGrid The matrix to be used to store the tasks.
- * @param M The number of rows in the task matrix.
- * @param N The number of columns in the task matrix.
- *
- * Runs through all indices and sets the values of the structs at that point to the defaults.
- * Should not be called until init_cuda_queue has returned.
- */
-__device__ void init_cuda_scheduler	(volatile Task* taskGrid,
-					int M, int N)
-{
-	int i , j, ref;
-
-	/* Possibly loops the wrong way round. Might need to swap these.
-	   Potential cause for not working with non-square. */
-	for(j = 0; j < M; j ++)
-	{
-		ref = j*M;
-		for(i = 0; i < N; i ++)
-		{
-			taskGrid[ref].l = i;
-			taskGrid[ref].m = j;
-			taskGrid[ref].taskStatus = NONE;
-			taskGrid[ref].k = 0;
-			taskGrid[ref].topBusy = 0;
-
-			cuda_mutex_unlock(&taskGrid[ref].mutex);
-			ref ++;
-		}
-	}
-
-	/* Insert the initial task into the task grid. */
-	makeTask( taskGrid, M, 0, 0, QRS, READY, 0 );
-}
-
-/*
  * @brief Changes the state of a task in the task structure and adds the index to the queue.
  * 
  * @param taskGrid The matrix of tasks.
@@ -345,10 +308,47 @@ __device__ void makeTask(volatile Task* taskGrid,
 		tgrid(l,m).k = newK;
 	
 		/* Add the index to the queue. */
-		cuda_queue_puttask( TLOC(x,y) );
+		cuda_queue_puttask( TLOC(l,m) );
 	}
 	/* Unlock the task. */
-	cuda_mutex_unlock(&tgrid(x,y).mutex);
+	cuda_mutex_unlock(&tgrid(l,m).mutex);
+}
+
+/*
+ * @brief Initialises the task grid to default values, and inserts the initial task.
+ *
+ * @param taskGrid The matrix to be used to store the tasks.
+ * @param M The number of rows in the task matrix.
+ * @param N The number of columns in the task matrix.
+ *
+ * Runs through all indices and sets the values of the structs at that point to the defaults.
+ * Should not be called until init_cuda_queue has returned.
+ */
+__device__ void init_cuda_scheduler	(volatile Task* taskGrid,
+					int M, int N)
+{
+	int i , j, ref;
+
+	/* Possibly loops the wrong way round. Might need to swap these.
+	   Potential cause for not working with non-square. */
+	for(j = 0; j < N; j ++)
+	{
+		ref = j*M;
+		for(i = 0; i < M; i ++)
+		{
+			taskGrid[ref].l = i;
+			taskGrid[ref].m = j;
+			taskGrid[ref].taskStatus = NONE;
+			taskGrid[ref].k = 0;
+			//taskGrid[ref].topBusy = 0;
+
+			cuda_mutex_unlock(&taskGrid[ref].mutex);
+			ref ++;
+		}
+	}
+
+	/* Insert the initial task into the task grid. */
+	makeTask( taskGrid, M, 0, 0, QRS, READY, 0 );
 }
 
 /*
@@ -412,7 +412,7 @@ __device__ int inGrid	(int M, int N,
 		ret = 0;
 	else if (l < 0)
 		ret = 0;
-	else if (y < 0)
+	else if (m < 0)
 		ret = 0;
 
 	return ret;
